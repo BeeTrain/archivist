@@ -5,7 +5,8 @@ import { DEFAULT_CONFIG, loadConfig } from "../core/config.js";
 import { PATHS, type Io } from "../core/io.js";
 import { activeEntries, appendLedger, loadState } from "../core/ledger.js";
 import { findStale, renderAll } from "../core/render.js";
-import { addEntry, applyProposals, listProposals, pick, reviewText, skipProposals } from "../core/review.js";
+import { commaList, parseOptions } from "../core/args.js";
+import { addEntry, applyProposals, deprecateEntry, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from "../core/review.js";
 import { ENTRY_TYPES, type EntryType } from "../core/types.js";
 import { validateOps, type Outcome } from "../core/validate.js";
 import { computeSignals } from "../analyzer/signals.js";
@@ -25,8 +26,12 @@ Usage: archivist <command> [--root <dir>]
   review                list the proposals waiting for review
   apply <n|1,3|all>     record proposals as they are
   skip <n|1,3|all>      drop proposals; the same idea is not proposed again
-  add --type <command|gotcha|decision> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
+  add --type <command|gotcha|decision|procedure> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
                         record a fact by hand (decisions need --why)
+  edit <id> [--title <t>] [--content <c>] [--why <reason>] [--paths <glob,glob>|--paths ""]
+                        fix a recorded entry; an empty --paths makes it apply everywhere
+  deprecate <id> --reason <why>
+                        retire an entry: it leaves the rules, the ledger keeps it with the reason
   recall <words>        the recorded entries that match: ask this before exploring
   baseline [--before <date>]
                         measure the project's Claude Code sessions before Archivist (from their transcripts)
@@ -97,17 +102,7 @@ const report = async (io: Io, which?: string): Promise<void> => {
   console.log(text ?? "No report yet: Archivist writes one after a task that taught something.");
 };
 
-/** `--name value` options; repeated names keep the last value. */
-const options = (args: string[]): Record<string, string> => {
-  const out: Record<string, string> = {};
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a.startsWith("--") && i + 1 < args.length) out[a.slice(2)] = args[++i]!;
-  }
-  return out;
-};
-
-const list = (s: string | undefined): string[] => (s ? s.split(",").map((x) => x.trim()).filter(Boolean) : []);
+const options = (args: string[]): Record<string, string> => parseOptions(args).opts;
 
 const add = async (io: Io, args: string[]): Promise<number> => {
   const o = options(args);
@@ -123,11 +118,33 @@ const add = async (io: Io, args: string[]): Promise<number> => {
   const outcomes = await addEntry(
     io,
     await loadConfig(io),
-    { type, title: o.title, content: o.content, ...(o.why ? { rationale: o.why } : {}), paths: list(o.paths), evidence: list(o.evidence) },
+    { type, title: o.title, content: o.content, ...(o.why ? { rationale: o.why } : {}), paths: commaList(o.paths), evidence: commaList(o.evidence) },
     now(),
   );
   printOutcomes(outcomes);
   return outcomes.some((x) => x.id) ? 0 : 1;
+};
+
+/** `edit` and `deprecate`: both fix what is already recorded. */
+const change = async (io: Io, verb: "edit" | "deprecate", args: string[]): Promise<number> => {
+  const { words, opts } = parseOptions(args);
+  const id = words[0];
+  if (!id) {
+    console.error(`${verb} needs an entry id (see .archivist/INDEX.md or archivist recall)`);
+    return 2;
+  }
+  const config = await loadConfig(io);
+  const r =
+    verb === "deprecate"
+      ? await deprecateEntry(io, config, id, opts.reason ?? "", now())
+      : await editEntry(io, config, id, editFromOptions(opts), now());
+  if (!r.ok) {
+    console.error(r.reason);
+    return 1;
+  }
+  console.log(`${verb === "edit" ? "~" : "−"} [${r.entry.type}] ${r.entry.title} \`${r.entry.id}\``);
+  printRender({ written: r.written, removed: [] });
+  return 0;
 };
 
 const review = async (io: Io, verb: "apply" | "skip", which: string | undefined): Promise<number> => {
@@ -246,6 +263,9 @@ const main = async (): Promise<number> => {
       return review(io, cmd, rest.join(","));
     case "add":
       return add(io, rest);
+    case "edit":
+    case "deprecate":
+      return change(io, cmd, rest);
     case "render":
       printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
       return 0;

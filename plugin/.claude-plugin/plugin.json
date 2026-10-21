@@ -1,11 +1,20 @@
 {
   "name": "archivist",
   "displayName": "Archivist",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Learns from each task: records commands, pitfalls and decisions as project docs that save time, tokens and context in later sessions",
-  "author": { "name": "BeeTrain", "url": "https://github.com/BeeTrain" },
+  "author": {
+    "name": "BeeTrain",
+    "url": "https://github.com/BeeTrain"
+  },
   "homepage": "https://github.com/BeeTrain/archivist",
   "repository": "https://github.com/BeeTrain/archivist",
   "license": "MIT",
-  "keywords": ["memory", "knowledge", "adr", "context", "tokens"]
+  "keywords": [
+    "memory",
+    "knowledge",
+    "adr",
+    "context",
+    "tokens"
+  ]
 }

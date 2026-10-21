@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0 — 2026-10-22
+
+- `archivist edit <id>` and `archivist deprecate <id> --reason …`, and the same as `/archivist edit|deprecate`: fix or retire what is already recorded. An empty `--paths` clears an entry's scope.
+- The curator no longer records one-off operations a task already finished (repo setup, credentials, commit rewrites).
+
 ## 1.0.0 — 2026-10-21
 
 - Published as a Claude Code marketplace: `/plugin install archivist --marketplace BeeTrain/archivist`.

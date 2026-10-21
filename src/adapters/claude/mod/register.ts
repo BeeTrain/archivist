@@ -11,7 +11,8 @@ import { DEFAULT_CONFIG, loadConfig, type Config } from '../../../core/config.js
 import { PATHS, joinPath, relPath, type Io, type Llm, type LlmReply } from '../../../core/io.js'
 import { activeEntries, loadState } from '../../../core/ledger.js'
 import { isExcluded, redact } from '../../../core/privacy.js'
-import { applyProposals, describeOp, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
+import { applyProposals, deprecateEntry, describeOp, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
+import { parseOptions, splitArgs } from '../../../core/args.js'
 import { recallText, statsText } from '../../../core/maintenance.js'
 import { truncate } from '../../../core/text.js'
 import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
@@ -253,7 +254,7 @@ export function register(on: On): void {
     await $.command.register({
       name: 'archivist',
       description: 'Archivist: what it learned from the last task (report) or the knowledge base status (status)',
-      argumentHint: '[report|status|stats|recall <words>|review|apply <n>|skip <n>|log]',
+      argumentHint: '[report|status|stats|recall <words>|review|apply <n>|skip <n>|edit <id> …|deprecate <id> --reason …|log]',
     })
 
     // Tasks waiting for analysis: this session's (a module reload dropped their timer; the open one is closed
@@ -353,12 +354,24 @@ export function register(on: On): void {
 
   on('command.run', { command: 'archivist' }, async ($, e) => {
     const io = makeIo($, root)
-    const [verb = 'report', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
+    const [verb = 'report', ...rest] = splitArgs(e.args)
     if (verb === 'log') {
       const lines = ((await $.store.get(LOG_KEY)) as string[] | undefined) ?? []
       return { text: lines.length ? lines.slice(-30).join('\n') : 'Archivist log is empty.' }
     }
     if (verb === 'review') return { text: reviewText(await listProposals(io)) }
+    if (verb === 'edit' || verb === 'deprecate') {
+      const { words, opts } = parseOptions(rest)
+      const id = words[0]
+      if (!id) return { text: `Usage: /archivist ${verb === 'edit' ? 'edit <id> [--title "…"] [--content "…"] [--why "…"] [--paths "a/**,b/**"]' : 'deprecate <id> --reason "…"'}` }
+      const now = new Date().toISOString()
+      const r =
+        verb === 'deprecate'
+          ? await deprecateEntry(io, cfg, id, opts.reason ?? '', now)
+          : await editEntry(io, cfg, id, editFromOptions(opts), now)
+      await refreshStatus($, io)
+      return { text: r.ok ? `${verb === 'edit' ? 'Updated' : 'Retired'} \`${r.entry.id}\`: ${r.entry.title}` : `Not changed: ${r.reason}` }
+    }
     if (verb === 'stats') return { text: await statsText(io, (await loadState(io)).entries) }
     if (verb === 'recall') return { text: recallText((await loadState(io)).entries, rest.join(' ')) }
     if (verb === 'apply' || verb === 'skip') {

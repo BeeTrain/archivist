@@ -328,16 +328,19 @@ var renderAll = async (io, entries, config) => {
   return { written: await writeViews(io, views), removed: await pruneViews(io, views), stale };
 };
 
-// src/core/types.ts
-var ENTRY_TYPES = ["command", "gotcha", "decision", "procedure"];
-var emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-var addUsage = (a, b) => ({
-  input: a.input + (b.input ?? 0),
-  output: a.output + (b.output ?? 0),
-  cacheRead: a.cacheRead + (b.cacheRead ?? 0),
-  cacheWrite: a.cacheWrite + (b.cacheWrite ?? 0)
-});
-var weightedTokens = (u) => u.input + u.output + u.cacheWrite + Math.round(u.cacheRead * 0.1);
+// src/core/args.ts
+var parseOptions = (tokens2) => {
+  const words = [];
+  const opts = {};
+  for (let i = 0; i < tokens2.length; i++) {
+    const t = tokens2[i];
+    if (!t.startsWith("--")) words.push(t);
+    else if (i + 1 < tokens2.length && !tokens2[i + 1].startsWith("--")) opts[t.slice(2)] = tokens2[++i];
+    else opts[t.slice(2)] = "true";
+  }
+  return { words, opts };
+};
+var commaList = (s) => s ? s.split(",").map((x) => x.trim()).filter(Boolean) : [];
 
 // src/core/privacy.ts
 var MASK = "[redacted]";
@@ -370,6 +373,17 @@ var redact = (text) => {
   return { text: out, count };
 };
 var isExcluded = (path, globs) => globs.some((g) => globToRegExp(g).test(path));
+
+// src/core/types.ts
+var ENTRY_TYPES = ["command", "gotcha", "decision", "procedure"];
+var emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+var addUsage = (a, b) => ({
+  input: a.input + (b.input ?? 0),
+  output: a.output + (b.output ?? 0),
+  cacheRead: a.cacheRead + (b.cacheRead ?? 0),
+  cacheWrite: a.cacheWrite + (b.cacheWrite ?? 0)
+});
+var weightedTokens = (u) => u.input + u.output + u.cacheWrite + Math.round(u.cacheRead * 0.1);
 
 // src/core/validate.ts
 var PROCEDURE_CHARS = 1500;
@@ -597,6 +611,41 @@ var addEntry = async (io, config, fields, now2) => record(
   ],
   now2
 );
+var editFromOptions = (o) => ({
+  ...o.title ? { title: o.title } : {},
+  ...o.content ? { content: o.content } : {},
+  ...o.why ? { rationale: o.why } : {},
+  ..."paths" in o ? { paths: commaList(o.paths === "true" ? "" : o.paths) } : {}
+});
+var activeEntry = async (io, id) => {
+  const e = (await loadState(io)).entries.get(id);
+  return e && e.status === "active" ? e : void 0;
+};
+var editEntry = async (io, config, id, edit, now2) => {
+  const e = await activeEntry(io, id);
+  if (!e) return { ok: false, reason: `no active entry ${id}` };
+  const max = e.type === "procedure" ? 1500 : config.budgets.maxContentChars;
+  const clean = (s, n) => redact(truncate(s.trim(), n)).text;
+  const patch = {};
+  if (edit.title?.trim() && edit.title.trim() !== e.title) patch.title = clean(edit.title, 120);
+  if (edit.content?.trim() && edit.content.trim() !== e.content) patch.content = clean(edit.content, max);
+  if (edit.rationale?.trim() && edit.rationale.trim() !== e.rationale) patch.rationale = clean(edit.rationale, max);
+  if (edit.paths && edit.paths.join("\n") !== (e.scope?.paths ?? []).join("\n")) patch.scope = { paths: edit.paths };
+  if (!Object.keys(patch).length) return { ok: false, reason: "nothing to change" };
+  await appendLedger(io, [{ v: 1, ts: now2, op: "update", id, patch }]);
+  const after = await loadState(io);
+  const r = await renderAll(io, after.entries, config);
+  return { ok: true, entry: after.entries.get(id), written: [...r.written, ...r.removed] };
+};
+var deprecateEntry = async (io, config, id, reason, now2) => {
+  const e = await activeEntry(io, id);
+  if (!e) return { ok: false, reason: `no active entry ${id}` };
+  if (!reason.trim()) return { ok: false, reason: "say why: --reason" };
+  await appendLedger(io, [{ v: 1, ts: now2, op: "deprecate", id, reason: redact(reason.trim()).text }]);
+  const after = await loadState(io);
+  const r = await renderAll(io, after.entries, config);
+  return { ok: true, entry: after.entries.get(id), written: [...r.written, ...r.removed] };
+};
 
 // src/analyzer/signals.ts
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -809,8 +858,8 @@ var compareText = (baseline2, recent) => {
       continue;
     }
     const before = baseline2.summary.medians[k];
-    const change = before && recent.tasks ? `${now2 <= before ? "\u2212" : "+"}${Math.round(Math.abs(now2 - before) / before * 100)}%` : "\u2014";
-    lines.push(`| ${label} | ${fmt(k, before)} | ${fmt(k, now2)} | ${change} |`);
+    const change2 = before && recent.tasks ? `${now2 <= before ? "\u2212" : "+"}${Math.round(Math.abs(now2 - before) / before * 100)}%` : "\u2014";
+    lines.push(`| ${label} | ${fmt(k, before)} | ${fmt(k, now2)} | ${change2} |`);
   }
   if (!recent.tasks) lines.push("", "No task measured since Archivist started: the comparison comes with the first analysed tasks.");
   else if (baseline2 && (baseline2.summary.tasks < 5 || recent.tasks < 5)) lines.push("", "Fewer than 5 tasks on one side: the change is noise until there are more.");
@@ -1071,8 +1120,12 @@ Usage: archivist <command> [--root <dir>]
   review                list the proposals waiting for review
   apply <n|1,3|all>     record proposals as they are
   skip <n|1,3|all>      drop proposals; the same idea is not proposed again
-  add --type <command|gotcha|decision> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
+  add --type <command|gotcha|decision|procedure> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
                         record a fact by hand (decisions need --why)
+  edit <id> [--title <t>] [--content <c>] [--why <reason>] [--paths <glob,glob>|--paths ""]
+                        fix a recorded entry; an empty --paths makes it apply everywhere
+  deprecate <id> --reason <why>
+                        retire an entry: it leaves the rules, the ledger keeps it with the reason
   recall <words>        the recorded entries that match: ask this before exploring
   baseline [--before <date>]
                         measure the project's Claude Code sessions before Archivist (from their transcripts)
@@ -1134,15 +1187,7 @@ var report = async (io, which) => {
   const text = file ? await io.read(file) : void 0;
   console.log(text ?? "No report yet: Archivist writes one after a task that taught something.");
 };
-var options = (args) => {
-  const out = {};
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a.startsWith("--") && i + 1 < args.length) out[a.slice(2)] = args[++i];
-  }
-  return out;
-};
-var list = (s) => s ? s.split(",").map((x) => x.trim()).filter(Boolean) : [];
+var options = (args) => parseOptions(args).opts;
 var add = async (io, args) => {
   const o = options(args);
   const type = o.type;
@@ -1157,11 +1202,28 @@ var add = async (io, args) => {
   const outcomes = await addEntry(
     io,
     await loadConfig(io),
-    { type, title: o.title, content: o.content, ...o.why ? { rationale: o.why } : {}, paths: list(o.paths), evidence: list(o.evidence) },
+    { type, title: o.title, content: o.content, ...o.why ? { rationale: o.why } : {}, paths: commaList(o.paths), evidence: commaList(o.evidence) },
     now()
   );
   printOutcomes(outcomes);
   return outcomes.some((x) => x.id) ? 0 : 1;
+};
+var change = async (io, verb, args) => {
+  const { words, opts } = parseOptions(args);
+  const id = words[0];
+  if (!id) {
+    console.error(`${verb} needs an entry id (see .archivist/INDEX.md or archivist recall)`);
+    return 2;
+  }
+  const config = await loadConfig(io);
+  const r = verb === "deprecate" ? await deprecateEntry(io, config, id, opts.reason ?? "", now()) : await editEntry(io, config, id, editFromOptions(opts), now());
+  if (!r.ok) {
+    console.error(r.reason);
+    return 1;
+  }
+  console.log(`${verb === "edit" ? "~" : "\u2212"} [${r.entry.type}] ${r.entry.title} \`${r.entry.id}\``);
+  printRender({ written: r.written, removed: [] });
+  return 0;
 };
 var review = async (io, verb, which) => {
   const proposals = await listProposals(io);
@@ -1274,6 +1336,9 @@ var main = async () => {
       return review(io, cmd, rest.join(","));
     case "add":
       return add(io, rest);
+    case "edit":
+    case "deprecate":
+      return change(io, cmd, rest);
     case "render":
       printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
       return 0;

@@ -47,6 +47,7 @@ describe("prompts", () => {
   it("scopes the reflection to the task and keeps entries atomic", () => {
     expect(reflectPrompt("напиши README")).toContain("Look ONLY at the most recent task: the messages from the user's request «напиши README»");
     expect(CURATE_SYSTEM).toContain("it must not repeat the title");
+    expect(CURATE_SYSTEM).toContain("Never record one-off operations");
   });
 });
 

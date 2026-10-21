@@ -1,9 +1,12 @@
 // The human side: review the analyzer's doubtful proposals, and record facts by hand.
 import type { Config } from "./config.js";
 import { PATHS, joinPath, type Io } from "./io.js";
+import { commaList } from "./args.js";
 import { appendLedger, loadState } from "./ledger.js";
+import { redact } from "./privacy.js";
+import { truncate } from "./text.js";
 import { renderAll } from "./render.js";
-import { ENTRY_TYPES, type EntryType, type ProposedOp, type RecordSource } from "./types.js";
+import { ENTRY_TYPES, type Entry, type EntryPatch, type EntryType, type ProposedOp, type RecordSource } from "./types.js";
 import { validateOps, type Outcome } from "./validate.js";
 
 export interface Proposal {
@@ -121,3 +124,55 @@ export const addEntry = async (
     ],
     now,
   );
+
+export interface EntryEdit {
+  title?: string;
+  content?: string;
+  rationale?: string;
+  /** New scope; an empty list makes the entry apply everywhere again. */
+  paths?: string[];
+}
+
+type Changed = { ok: true; entry: Entry; written: string[] } | { ok: false; reason: string };
+
+/** `--title`, `--content`, `--why`, `--paths` as an edit; a bare or empty `--paths` clears the scope. */
+export const editFromOptions = (o: Record<string, string>): EntryEdit => ({
+  ...(o.title ? { title: o.title } : {}),
+  ...(o.content ? { content: o.content } : {}),
+  ...(o.why ? { rationale: o.why } : {}),
+  ...("paths" in o ? { paths: commaList(o.paths === "true" ? "" : o.paths) } : {}),
+});
+
+const activeEntry = async (io: Io, id: string): Promise<Entry | undefined> => {
+  const e = (await loadState(io)).entries.get(id);
+  return e && e.status === "active" ? e : undefined;
+};
+
+/** Fixes an entry in place: the ledger gets an update, the rule files are rendered again. */
+export const editEntry = async (io: Io, config: Config, id: string, edit: EntryEdit, now: string): Promise<Changed> => {
+  const e = await activeEntry(io, id);
+  if (!e) return { ok: false, reason: `no active entry ${id}` };
+  const max = e.type === "procedure" ? 1500 : config.budgets.maxContentChars;
+  const clean = (s: string, n: number) => redact(truncate(s.trim(), n)).text;
+  const patch: EntryPatch = {};
+  if (edit.title?.trim() && edit.title.trim() !== e.title) patch.title = clean(edit.title, 120);
+  if (edit.content?.trim() && edit.content.trim() !== e.content) patch.content = clean(edit.content, max);
+  if (edit.rationale?.trim() && edit.rationale.trim() !== e.rationale) patch.rationale = clean(edit.rationale, max);
+  if (edit.paths && edit.paths.join("\n") !== (e.scope?.paths ?? []).join("\n")) patch.scope = { paths: edit.paths };
+  if (!Object.keys(patch).length) return { ok: false, reason: "nothing to change" };
+  await appendLedger(io, [{ v: 1, ts: now, op: "update", id, patch }]);
+  const after = await loadState(io);
+  const r = await renderAll(io, after.entries, config);
+  return { ok: true, entry: after.entries.get(id)!, written: [...r.written, ...r.removed] };
+};
+
+/** Retires an entry: it leaves the rule files and stays in the ledger with the reason. */
+export const deprecateEntry = async (io: Io, config: Config, id: string, reason: string, now: string): Promise<Changed> => {
+  const e = await activeEntry(io, id);
+  if (!e) return { ok: false, reason: `no active entry ${id}` };
+  if (!reason.trim()) return { ok: false, reason: "say why: --reason" };
+  await appendLedger(io, [{ v: 1, ts: now, op: "deprecate", id, reason: redact(reason.trim()).text }]);
+  const after = await loadState(io);
+  const r = await renderAll(io, after.entries, config);
+  return { ok: true, entry: after.entries.get(id)!, written: [...r.written, ...r.removed] };
+};
