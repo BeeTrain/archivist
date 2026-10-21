@@ -7,6 +7,8 @@ Record one fact the next sessions in this project should know, as an Archivist e
 
 What to remember: $ARGUMENTS (if empty, take it from the conversation: the last correction or discovery the user wants kept).
 
+Record only facts about this project that will still hold in later sessions. Something personal, temporary or one-off ("I'm working from home today", "skip the tests this time") is not project knowledge: do not record it, and say in one line why. Never record a secret: write the variable name, not its value.
+
 1. Decide the type:
    - `command`: an exact command to build, test, run, generate, deploy.
    - `gotcha`: a pitfall or non-obvious constraint, and how to avoid it.

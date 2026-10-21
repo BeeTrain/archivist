@@ -1,6 +1,4 @@
 node_modules/
-plugin/hooks/register.js
-plugin/bin/
 .archivist/.local/
 *.log
 

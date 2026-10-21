@@ -474,6 +474,23 @@ archivist/
 
 ### Этап 4. v1.0: публикация (≈ 3–5 дней)
 
+**Статус на 2026-10-21: сделан, кроме недели dogfooding.**
+- **Маркетплейс** `.claude-plugin/marketplace.json`. Установка: `/plugin install archivist --marketplace BeeTrain/archivist`. Проверено установкой из локальной копии в отдельный `CLAUDE_CONFIG_DIR`.
+- **Собранный плагин лежит в git.** Маркетплейс ничего не собирает, а CI проверяет, что сборка актуальна. `validate --strict` проходит для плагина и для маркетплейса.
+- **`archivist uninstall [--purge]`** удаляет только файлы с пометкой генерации.
+- **Eval-кейсы в `plugin/evals/`** заменяют исходный список:
+  - «ловушка зафиксирована» → `remember-pitfall`, с проверкой привязки к путям;
+  - «решение попало в ADR» → `decide-adr`;
+  - «правильный NOOP» → `remember-declines-personal`;
+  - «нет цикла на Stop» → `remember-masks-secret`. Цикл на Stop не применим к архитектуре на модах.
+
+  Формат кейсов CLI принял. Сами прогоны требуют залогиненного `claude`, здесь их запустить не удалось.
+- **LICENSE (MIT), CHANGELOG, CI на GitHub Actions.**
+
+Осталось:
+- прогнать eval из залогиненного CLI;
+- неделя dogfooding на 2–3 проектах, затем подстройка порогов: `minToolCalls`, `idleSeconds`, `autoConfidence`, `forkMaxContextTokens`, бюджеты.
+
 - `marketplace.json`, `claude plugin validate --strict`.
 - Eval-кейсы `claude plugin eval`: «правильный NOOP», «ловушка зафиксирована», «нет цикла на Stop», «решение попало в ADR».
 - README, раздел о стоимости и приватности, `archivist uninstall` (чистое удаление).

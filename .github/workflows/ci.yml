@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # Installing from the marketplace clones the repo and builds nothing: the built plugin must be committed.
+      - name: Built plugin is committed and current
+        run: git diff --exit-code -- plugin/
+      - name: Validate plugin and marketplace
+        run: |
+          npx -y @anthropic-ai/claude-code@2.1.306 plugin validate plugin --strict
+          npx -y @anthropic-ai/claude-code@2.1.306 plugin validate . --strict
