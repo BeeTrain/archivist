@@ -7,7 +7,7 @@ import { PATHS, type Llm } from "../src/core/io.js";
 import { appendLedger, loadState } from "../src/core/ledger.js";
 import { gcCandidates, lint, recallText, statsText } from "../src/core/maintenance.js";
 import { BASELINE, compareText, loadMetrics, summarize, toMetrics } from "../src/core/metrics.js";
-import { renderAll, skillPath } from "../src/core/render.js";
+import { renderAll, renderViews, skillPath } from "../src/core/render.js";
 import { listProposals } from "../src/core/review.js";
 import { commandsUsed, loadUsage, recordUse, type UsageMap } from "../src/core/usage.js";
 import { validateOps } from "../src/core/validate.js";
@@ -97,7 +97,7 @@ describe("usage and self-correction", () => {
 });
 
 describe("procedures", () => {
-  const op = { op: "add" as const, type: "procedure" as const, title: "Release a version", content: "1. npm run check\n2. npm version minor\n3. git push --tags", rationale: "cutting a release", confidence: 0.9 };
+  const op = { op: "add" as const, type: "procedure" as const, title: "Release a version", content: "1. npm run check\n2. npm version minor\n3. git push --tags", rationale: "Use when cutting a release.", confidence: 0.9 };
 
   it("waits for a repeat, then goes to review, and renders as a skill once applied", async () => {
     const io = memoryIo();
@@ -107,15 +107,15 @@ describe("procedures", () => {
     const second = await validateOps({ ops: [op], entries: new Map(), io, config: config({ autoTypes: ["command", "gotcha", "decision", "procedure"] }), docs: [], now: ts, procedureCandidates: first.firstSightings });
     expect(second.proposals[0]).toMatchObject({ type: "procedure", reason: "seen in an earlier task too" });
 
-    const proc = entry({ id: "proc-1", type: "procedure", title: "Release a version", content: op.content, rationale: "cutting a release" });
+    const proc = entry({ id: "proc-1", type: "procedure", title: "Release a version", content: op.content, rationale: "Use when cutting a release." });
     await appendLedger(io, [add(proc)]);
     await renderAll(io, (await loadState(io)).entries, config());
     expect(skillPath(proc)).toBe(".claude/skills/archivist-release-a-version/SKILL.md");
-    expect(io.files.get(skillPath(proc))).toMatch(/^---\nname: archivist-release-a-version\ndescription: "Release a version\. Use when cutting a release"\n---/);
+    expect(io.files.get(skillPath(proc))).toMatch(/^---\nname: archivist-release-a-version\ndescription: "Release a version\. Use when cutting a release\."\n---/);
     expect(io.files.get(PATHS.coreRule)).not.toContain("npm version minor");
 
     await appendLedger(io, [{ v: 1, ts, op: "deprecate", id: "proc-1", reason: "x" }]);
-    expect((await renderAll(io, (await loadState(io)).entries, config())).removed).toEqual([skillPath(proc)]);
+    expect((await renderAll(io, (await loadState(io)).entries, config())).removed).toEqual([skillPath(proc), ".claude/skills/archivist-release-a-version/"]);
   });
 });
 
@@ -147,3 +147,27 @@ describe("maintenance", () => {
     expect(await statsText(io, new Map())).toContain("| tool calls | 20 | 10 | −50% |");
   });
 });
+
+describe("skill directories", () => {
+  const proc = (title: string, rationale?: string) =>
+    entry({ id: "proc-2", type: "procedure", title, content: "1. a\n2. b", ...(rationale ? { rationale } : {}) });
+
+  it("writes the description in the entries' own words, without a forced English prefix", () => {
+    const r = renderViewsFor(proc("Release плагина: версия, тег, CI.", "Использовать при выпуске новой версии плагина."));
+    expect(r).toContain('description: "Release плагина: версия, тег, CI. Использовать при выпуске новой версии плагина."');
+    expect(renderViewsFor(proc("Release a version"))).toContain('description: "Release a version."');
+  });
+
+  it("removes a skill directory its generated file left empty, even one left by an earlier version, and keeps one with a file someone added", async () => {
+    const io = memoryIo({ ".claude/skills/archivist-mine/notes.md": "mine" }, [".claude/skills/archivist-proc-old"]);
+    const r = await renderAll(io, new Map(), config());
+    expect(r.removed).toEqual([".claude/skills/archivist-proc-old/"]);
+    expect(io.dirs.has(".claude/skills/archivist-proc-old")).toBe(false);
+    expect(io.files.has(".claude/skills/archivist-mine/notes.md")).toBe(true);
+  });
+});
+
+const renderViewsFor = (e: ReturnType<typeof entry>): string => {
+  const views = renderViews(new Map([[e.id, e]]), config());
+  return views.get(skillPath(e))!;
+};

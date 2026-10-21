@@ -29,6 +29,9 @@ export const nodeIo = (root: string): Io => ({
   async remove(p) {
     await rm(join(root, p), { force: true });
   },
+  async removeEmptyDir(p) {
+    await rmdir(join(root, p)).catch(() => undefined);
+  },
 });
 
 /** The project root: the nearest ancestor with .git or .archivist, else the start directory. */

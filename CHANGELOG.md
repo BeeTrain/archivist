@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1 — 2026-10-22
+
+- Fix: a skill directory emptied by a rename or removal is removed too, including one left by an earlier version; a directory holding a file someone added stays.
+- Fix: a procedure skill's description is its title and its "when to use" sentence, without a forced English "Use when" prefix.
+
 ## 1.2.0 — 2026-10-22
 
 - `/archivist:triage`: the agent checks technical proposals against the code and settles them, asking the user only about decisions and removals, in plain words.

@@ -134,7 +134,8 @@ export const skillPath = (e: Entry): string => {
 /** A repeated workflow, as a skill: its name and description sit in every session's skill list, the steps load on use. */
 export const renderSkill = (e: Entry): string => {
   const name = skillPath(e).split("/").at(-2)!;
-  const description = oneLine(`${e.title}.${e.rationale ? ` Use when ${e.rationale.replace(/^use when\s+/i, "")}` : ""}`);
+  // The rationale of a procedure is a whole sentence saying when to use it, in the entries' language.
+  const description = oneLine(`${e.title.replace(/[.\s]+$/, "")}.${e.rationale ? ` ${e.rationale}` : ""}`);
   return ["---", `name: ${name}`, `description: ${JSON.stringify(description)}`, "---", GENERATED, `# ${e.title}`, "", e.content.trim(), ""].join("\n");
 };
 
@@ -184,7 +185,8 @@ export const pruneViews = async (io: Io, views: Map<string, string>): Promise<st
   const files: string[] = [];
   for (const dir of [PATHS.rulesDir, PATHS.decisions])
     for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
-  for (const dir of await io.list(PATHS.skillsDir)) if (dir.startsWith("archivist-")) files.push(joinPath(PATHS.skillsDir, dir, "SKILL.md"));
+  const skillDirs = (await io.list(PATHS.skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(PATHS.skillsDir, d));
+  for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
 
   const removed: string[] = [];
   for (const path of files) {
@@ -192,6 +194,14 @@ export const pruneViews = async (io: Io, views: Map<string, string>): Promise<st
     if (!((await io.read(path)) ?? "").slice(0, 600).includes(GENERATED)) continue;
     await io.remove(path);
     removed.push(path);
+  }
+  // A skill is a directory: once its generated SKILL.md is gone (now or by an earlier version), the emptied
+  // directory goes too. One that still holds a file someone added stays.
+  for (const dir of skillDirs) {
+    if (views.has(joinPath(dir, "SKILL.md")) || (await io.exists(joinPath(dir, "SKILL.md")))) continue;
+    if (!io.removeEmptyDir || (await io.list(dir)).length) continue;
+    await io.removeEmptyDir(dir);
+    removed.push(`${dir}/`);
   }
   return removed;
 };

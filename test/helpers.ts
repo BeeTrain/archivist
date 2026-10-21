@@ -2,11 +2,15 @@ import { DEFAULT_CONFIG, type Config } from "../src/core/config.js";
 import type { Io } from "../src/core/io.js";
 import type { Entry, Segment, ToolEvent } from "../src/core/types.js";
 
-export const memoryIo = (files: Record<string, string> = {}): Io & { files: Map<string, string> } => {
+/** In-memory Io. Directories are implied by files; `dirs` adds empty ones (left behind by an earlier version). */
+export const memoryIo = (files: Record<string, string> = {}, dirs: string[] = []): Io & { files: Map<string, string>; dirs: Set<string> } => {
   const map = new Map(Object.entries(files));
+  const empty = new Set(dirs);
+  const under = (dir: string) => [...map.keys(), ...empty].filter((k) => k.startsWith(`${dir}/`));
   return {
     root: "/proj",
     files: map,
+    dirs: empty,
     async read(p) {
       return map.get(p);
     },
@@ -14,13 +18,16 @@ export const memoryIo = (files: Record<string, string> = {}): Io & { files: Map<
       map.set(p, t);
     },
     async exists(p) {
-      return map.has(p) || [...map.keys()].some((k) => k.startsWith(`${p}/`));
+      return map.has(p) || empty.has(p) || under(p).length > 0;
     },
     async list(dir) {
-      return [...new Set([...map.keys()].filter((k) => k.startsWith(`${dir}/`)).map((k) => k.slice(dir.length + 1).split("/")[0]!))];
+      return [...new Set(under(dir).map((k) => k.slice(dir.length + 1).split("/")[0]!))];
     },
     async remove(p) {
       map.delete(p);
+    },
+    async removeEmptyDir(p) {
+      if (!under(p).length) empty.delete(p);
     },
   };
 };

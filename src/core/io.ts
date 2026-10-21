@@ -9,6 +9,8 @@ export interface Io {
   exists(path: string): Promise<boolean>;
   list(dir: string): Promise<string[]>;
   remove?(path: string): Promise<void>;
+  /** Removes a directory only if it is empty; a no-op otherwise, so nothing someone else put there goes. */
+  removeEmptyDir?(path: string): Promise<void>;
 }
 
 /** The model calls the analyzer needs. */

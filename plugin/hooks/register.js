@@ -446,7 +446,7 @@ var skillPath = (e) => {
 };
 var renderSkill = (e) => {
   const name = skillPath(e).split("/").at(-2);
-  const description = oneLine(`${e.title}.${e.rationale ? ` Use when ${e.rationale.replace(/^use when\s+/i, "")}` : ""}`);
+  const description = oneLine(`${e.title.replace(/[.\s]+$/, "")}.${e.rationale ? ` ${e.rationale}` : ""}`);
   return ["---", `name: ${name}`, `description: ${JSON.stringify(description)}`, "---", GENERATED, `# ${e.title}`, "", e.content.trim(), ""].join("\n");
 };
 var renderViews = (entries, config, stale = /* @__PURE__ */ new Set()) => {
@@ -485,13 +485,20 @@ var pruneViews = async (io, views) => {
   const files = [];
   for (const dir of [PATHS.rulesDir, PATHS.decisions])
     for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
-  for (const dir of await io.list(PATHS.skillsDir)) if (dir.startsWith("archivist-")) files.push(joinPath(PATHS.skillsDir, dir, "SKILL.md"));
+  const skillDirs = (await io.list(PATHS.skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(PATHS.skillsDir, d));
+  for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
   const removed = [];
   for (const path of files) {
     if (views.has(path) || !await io.exists(path)) continue;
     if (!(await io.read(path) ?? "").slice(0, 600).includes(GENERATED)) continue;
     await io.remove(path);
     removed.push(path);
+  }
+  for (const dir of skillDirs) {
+    if (views.has(joinPath(dir, "SKILL.md")) || await io.exists(joinPath(dir, "SKILL.md"))) continue;
+    if (!io.removeEmptyDir || (await io.list(dir)).length) continue;
+    await io.removeEmptyDir(dir);
+    removed.push(`${dir}/`);
   }
   return removed;
 };
@@ -985,13 +992,13 @@ var CURATE_SYSTEM = [
   "- A decision needs a rationale (why, and what was rejected).",
   "- confidence: 0.9+ only for facts directly confirmed in the task (a command that ran, a decision the user approved); 0.5\u20130.7 for plausible but unverified; below 0.5 do not propose.",
   "- Most tasks teach nothing durable: then return no ops.",
-  "- procedure: only for a multi-step workflow that is likely to recur; content is its numbered steps (exact commands), rationale says when to use it.",
+  '- procedure: only for a multi-step workflow that is likely to recur; content is its numbered steps (exact commands), rationale is one full sentence saying when to use it ("Use when cutting a release.").',
   "- feedback: for existing entries the notes say were USED (helpful) or WRONG (harmful). Never guess: no mention, no feedback.",
   "",
   "Answer with ONE JSON object and nothing else:",
   '{"summary": "<one line: what this task taught, or why nothing>",',
   ' "ops": [',
-  '  {"op":"add","type":"command|gotcha|decision|procedure","title":"<\u22648 words>","content":"<1\u20132 lines; numbered steps for a procedure>","rationale":"<why for a decision; when to use for a procedure>",',
+  '  {"op":"add","type":"command|gotcha|decision|procedure","title":"<\u22648 words>","content":"<1\u20132 lines; numbered steps for a procedure>","rationale":"<why for a decision; for a procedure, one sentence saying when to use it>",',
   '   "scope":{"paths":["src/db/**"]},"evidence":[{"file":"<project-relative path>","anchor":"<script/symbol/heading>"}],',
   '   "confidence":0.0,"supersedes":["<id>"],"savings":{"toolCalls":0,"tokens":0}},',
   '  {"op":"update","id":"<id>","content":"<new content>","confidence":0.0},',
@@ -1307,6 +1314,9 @@ function makeIo($, base) {
     },
     async remove(p) {
       await $.process.run(["rm", "-f", abs(p)]);
+    },
+    async removeEmptyDir(p) {
+      await $.process.run(["rmdir", abs(p)]);
     },
     async exists(p) {
       return await $.fs.exists(abs(p));

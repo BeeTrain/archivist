@@ -102,6 +102,10 @@ function makeIo($: any, base: string): Io {
       // $.fs has no delete: the generated file goes through the shell.
       await $.process.run(['rm', '-f', abs(p)])
     },
+    async removeEmptyDir(p) {
+      // rmdir refuses a directory that still holds anything: only an emptied one goes.
+      await $.process.run(['rmdir', abs(p)])
+    },
     async exists(p) {
       return await $.fs.exists(abs(p))
     },
