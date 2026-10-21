@@ -13,7 +13,7 @@ import { activeEntries, loadState } from '../../../core/ledger.js'
 import { isExcluded, redact } from '../../../core/privacy.js'
 import { applyProposals, deprecateEntry, describeOp, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
 import { parseOptions, splitArgs } from '../../../core/args.js'
-import { recallText, statsText } from '../../../core/maintenance.js'
+import { healthText, recallText, statsText } from '../../../core/maintenance.js'
 import { logKey, withLine } from '../../../core/log.js'
 import { truncate } from '../../../core/text.js'
 import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
@@ -265,7 +265,7 @@ export function register(on: On): void {
     await $.command.register({
       name: 'archivist',
       description: 'Archivist: what it learned from the last task (report) or the knowledge base status (status)',
-      argumentHint: '[report|status|stats|recall <words>|review|apply <n>|skip <n>|edit <id> …|deprecate <id> --reason …|log]',
+      argumentHint: '[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> …|deprecate <id> --reason …|log]',
     })
 
     // Tasks waiting for analysis: this session's (a module reload dropped their timer; the open one is closed
@@ -393,6 +393,13 @@ export function register(on: On): void {
       return { text: r.ok ? `${verb === 'edit' ? 'Updated' : 'Retired'} \`${r.entry.id}\`: ${r.entry.title}` : `Not changed: ${r.reason}` }
     }
     if (verb === 'stats') return { text: await statsText(io, (await loadState(io)).entries) }
+    if (verb === 'health')
+      return {
+        text: await healthText(io, (await loadState(io)).entries, cfg, new Date(), {
+          log: ((await $.store.get(logKey(root))) as string[] | undefined) ?? [],
+          spentToday: ((await $.store.get(BUDGET_KEY + today())) as number | undefined) ?? 0,
+        }),
+      }
     if (verb === 'recall') return { text: recallText((await loadState(io)).entries, rest.join(' ')) }
     if (verb === 'apply' || verb === 'skip') {
       const chosen = pick(await listProposals(io), rest.join(','))

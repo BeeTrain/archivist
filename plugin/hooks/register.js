@@ -287,6 +287,18 @@ var weightedTokens = (u) => u.input + u.output + u.cacheWrite + Math.round(u.cac
 // src/core/metrics.ts
 var METRICS = ".archivist/.local/metrics.jsonl";
 var BASELINE = ".archivist/.local/baseline.json";
+var ANALYSES = ".archivist/.local/analyses.jsonl";
+var appendAnalysis = async (io, r) => {
+  const prev = await io.read(ANALYSES) ?? "";
+  await io.write(ANALYSES, prev + JSON.stringify(r) + "\n");
+};
+var loadAnalyses = async (io) => (await io.read(ANALYSES) ?? "").split("\n").flatMap((l) => {
+  try {
+    return l ? [JSON.parse(l)] : [];
+  } catch {
+    return [];
+  }
+});
 var toMetrics = (s, ts, source) => ({
   ts,
   source,
@@ -749,6 +761,7 @@ var pick = (proposals, which) => {
   const keys = new Set(which.split(/[\s,]+/).filter(Boolean));
   return proposals.filter((p) => keys.has(String(p.n)) || keys.has(p.id));
 };
+var needsHuman = (op) => op.op === "deprecate" || op.op === "add" && op.type === "decision";
 var asUser = (config) => ({ ...config, apply: { autoConfidence: 0, autoTypes: [...ENTRY_TYPES] } });
 var record = async (io, config, ops, now, src) => {
   const state = await loadState(io);
@@ -898,6 +911,88 @@ var recallText = (entries, query, k2 = 5) => {
     const where = e.type === "decision" ? ` \u2192 ${adrPath(e)}` : e.scope ? ` (${e.scope.paths.join(", ")})` : "";
     return `- \`${e.id}\` [${e.type}] ${e.title}: ${e.content.replace(/\s*\n\s*/g, " ")}${where}`;
   }).join("\n");
+};
+var lint = async (io, entries, config) => {
+  const out = [];
+  const active = activeEntries(entries);
+  for (let i = 0; i < active.length; i++)
+    for (let j = i + 1; j < active.length; j++) {
+      const a = active[i];
+      const b = active[j];
+      if (a.type !== b.type) continue;
+      const sim = jaccard(`${a.title} ${a.content}`, `${b.title} ${b.content}`);
+      if (sim >= 0.45) out.push({ level: "warn", text: `\`${a.id}\` and \`${b.id}\` say much the same (${Math.round(sim * 100)}%): merge, or one contradicts the other` });
+      else if (a.type === "command" && a.title.toLowerCase() === b.title.toLowerCase())
+        out.push({ level: "warn", text: `\`${a.id}\` and \`${b.id}\` are both "${a.title}" with different commands: which one is right?` });
+    }
+  for (const id of await findStale(io, entries)) out.push({ level: "warn", text: `\`${id}\` is stale: every file it cites is gone` });
+  const usage = await loadUsage(io);
+  for (const e of active) {
+    if (e.type === "decision" && !e.rationale) out.push({ level: "warn", text: `\`${e.id}\` is a decision without a reason` });
+    if ((usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0)) out.push({ level: "warn", text: `\`${e.id}\` was judged wrong more often than helpful` });
+    if (!e.evidence.some((v) => v.file) && e.type !== "decision") out.push({ level: "info", text: `\`${e.id}\` cites no file: it cannot go stale when the code changes` });
+  }
+  const core = renderCore([...entries.values()], config);
+  const omitted = core.match(/(\d+) more in `/);
+  if (omitted) out.push({ level: "warn", text: `${omitted[1]} entries do not fit in ${PATHS.coreRule} (${config.budgets.coreLines} lines): scope some to paths, or retire some` });
+  return out;
+};
+var WEEK = 7 * 864e5;
+var healthText = async (io, entries, config, now, extras = {}) => {
+  const since = new Date(now.getTime() - WEEK).toISOString();
+  const active = activeEntries(entries);
+  const by = (t) => active.filter((e) => e.type === t).length;
+  const stale = await findStale(io, entries);
+  const queue = await listProposals(io);
+  const human = queue.filter((p) => needsHuman(p.op)).length;
+  const coreLines = Math.max(0, (await io.read(PATHS.coreRule) ?? "").split("\n").length - 1);
+  const areas = groupAreas(active, stale).size;
+  const week = (await loadAnalyses(io)).filter((a) => a.ts >= since);
+  const done = week.filter((a) => a.outcome === "done");
+  const tasks = (await loadMetrics(io)).filter((m) => m.source === "live" && m.ts >= since).length;
+  const errors = week.filter((a) => a.error).length;
+  const logWeek = (extras.log ?? []).filter((l) => l.slice(0, 24) >= since);
+  const failed = logWeek.filter((l) => l.includes(": failed:")).length;
+  const postponed = logWeek.filter((l) => l.includes(": postponed:")).length;
+  const recorded = done.reduce((s, a) => s + a.applied, 0);
+  const proposed = done.reduce((s, a) => s + a.proposals, 0);
+  const spent = week.reduce((s, a) => s + a.tokens, 0);
+  const usage = await loadUsage(io);
+  const met = active.filter((e) => usage[e.id]).length;
+  const neverMet = active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since);
+  const wrong = active.filter((e) => (usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0));
+  const warnings = (await lint(io, entries, config)).filter((f) => f.level === "warn");
+  const k2 = (n) => n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
+  const lines = [
+    "# Archivist health",
+    "",
+    "## Knowledge",
+    `- ${active.length} active entries: ${by("command")} commands, ${by("gotcha")} gotchas, ${by("decision")} decisions, ${by("procedure")} procedures; ${entries.size - active.length} retired; ${stale.size} stale`,
+    `- always loaded: ${PATHS.coreRule} ${coreLines}/${config.budgets.coreLines} lines; ${areas} path-scoped rule files`,
+    `- review queue: ${queue.length}${human ? ` (${human} decisions or removals wait for you)` : ""}`,
+    "",
+    "## Last 7 days",
+    week.length || !tasks ? `- ${tasks} tasks seen; ${week.length} analysed: ${done.length} fully, ${week.length - done.length} skipped as trivial` : `- ${tasks} tasks seen; the analysis journal starts with Archivist 1.3.0, so these counts fill in from the next analysed task`,
+    `- recorded ${recorded} entries, proposed ${proposed}; analysis cost ${k2(spent)} weighted tokens${extras.spentToday !== void 0 ? ` (today ${k2(extras.spentToday)} of ${k2(config.analyzer.maxTokensPerDay)})` : ""}`,
+    `- problems: ${errors} analyses with model errors${extras.log ? `, ${failed} failed, ${postponed} postponed` : ""}`,
+    "",
+    "## Entries in use",
+    `- ${met} of ${active.length} met in a task (rule loaded, command run, or confirmed)`,
+    ...neverMet.length ? [`- never met, older than a week: ${neverMet.slice(0, 5).map((e) => `\`${e.id}\` ${e.title}`).join("; ")}${neverMet.length > 5 ? ` and ${neverMet.length - 5} more` : ""}`] : [],
+    ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
+  ];
+  if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
+  const todo = [];
+  if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
+  if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
+  if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
+  if (neverMet.length >= 3) todo.push(`${neverMet.length} entries never met in a week: archivist gc --days 7 lists them, --apply retires them`);
+  if (warnings.some((w) => !w.text.includes("stale") && !w.text.includes("judged wrong"))) todo.push("lint findings above: merge or fix them with /archivist edit or /archivist deprecate");
+  if (coreLines > config.budgets.coreLines * 0.9) todo.push(`${PATHS.coreRule} is near its budget: scope entries to paths (/archivist edit <id> --paths "\u2026")`);
+  if (week.length >= 5 && !done.some((a) => a.applied || a.proposals)) todo.push("nothing recorded in a week of tasks: the thresholds may be too strict (analyzer.minToolCalls, apply.autoConfidence)");
+  if (!await loadBaseline(io)) todo.push("no baseline yet: archivist baseline, so /archivist stats can show the effect");
+  lines.push("", "## What to do", ...todo.length ? todo.map((t) => `- ${t}`) : ["- Nothing: Archivist is doing fine here."]);
+  return lines.join("\n") + "\n";
 };
 
 // src/core/log.ts
@@ -1207,7 +1302,10 @@ var analyzeSegment = async (args) => {
   const counters = await loadUsage(io);
   recordUse(counters, { seen, used, feedback: [], known, ts });
   await saveUsage(io, counters);
-  if (isTrivial(signals, config)) return { kind: "skipped", reason: "trivial task", usage };
+  if (isTrivial(signals, config)) {
+    await appendAnalysis(io, { ts, outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 });
+    return { kind: "skipped", reason: "trivial task", usage };
+  }
   const candidates = pickCandidates(active, seg2, signals.edits);
   const inPlay = [];
   for (const e of [...[...seen, ...used].map((id) => state.entries.get(id)), ...candidates]) if (!inPlay.includes(e) && inPlay.length < 20) inPlay.push(e);
@@ -1279,6 +1377,15 @@ var analyzeSegment = async (args) => {
   };
   const reportPath = joinPath(PATHS.reports, `${ts.replace(/[:.]/g, "-")}.md`);
   await io.write(reportPath, reportMarkdown(report));
+  await appendAnalysis(io, {
+    ts,
+    outcome: "done",
+    applied: v.applied.filter((o) => o.op.op !== "reinforce").length,
+    proposals: proposals.length,
+    dropped: v.rejected.length,
+    tokens: weightedTokens(usage),
+    ...error ? { error } : {}
+  });
   return { kind: "done", report, reportPath, usage };
 };
 
@@ -1476,7 +1583,7 @@ function register(on) {
     await $.command.register({
       name: "archivist",
       description: "Archivist: what it learned from the last task (report) or the knowledge base status (status)",
-      argumentHint: "[report|status|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|log]"
+      argumentHint: "[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|log]"
     });
     const waiting = /* @__PURE__ */ new Map();
     for (const key of await $.store.keys()) {
@@ -1590,6 +1697,13 @@ function register(on) {
       return { text: r.ok ? `${verb === "edit" ? "Updated" : "Retired"} \`${r.entry.id}\`: ${r.entry.title}` : `Not changed: ${r.reason}` };
     }
     if (verb === "stats") return { text: await statsText(io, (await loadState(io)).entries) };
+    if (verb === "health")
+      return {
+        text: await healthText(io, (await loadState(io)).entries, cfg, /* @__PURE__ */ new Date(), {
+          log: await $.store.get(logKey(root)) ?? [],
+          spentToday: await $.store.get(BUDGET_KEY + today()) ?? 0
+        })
+      };
     if (verb === "recall") return { text: recallText((await loadState(io)).entries, rest.join(" ")) };
     if (verb === "apply" || verb === "skip") {
       const chosen = pick(await listProposals(io), rest.join(","));

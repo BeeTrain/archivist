@@ -3,8 +3,9 @@
 import type { Config } from "./config.js";
 import { PATHS, type Io } from "./io.js";
 import { activeEntries } from "./ledger.js";
-import { compareText, loadBaseline, loadMetrics, summarize } from "./metrics.js";
-import { adrPath, findStale, renderCore } from "./render.js";
+import { compareText, loadAnalyses, loadBaseline, loadMetrics, summarize } from "./metrics.js";
+import { listProposals, needsHuman } from "./review.js";
+import { adrPath, findStale, groupAreas, renderCore } from "./render.js";
 import { bm25, jaccard } from "./text.js";
 import type { Entry, LedgerRecord } from "./types.js";
 import { loadUsage, unusedFor, type UsageMap } from "./usage.js";
@@ -103,4 +104,81 @@ export const lint = async (io: Io, entries: Map<string, Entry>, config: Config):
   const omitted = core.match(/(\d+) more in `/);
   if (omitted) out.push({ level: "warn", text: `${omitted[1]} entries do not fit in ${PATHS.coreRule} (${config.budgets.coreLines} lines): scope some to paths, or retire some` });
   return out;
+};
+
+/** What only the mod knows: its own log (failures, postponements) and today's analysis spend. */
+export interface HealthExtras {
+  log?: string[];
+  spentToday?: number;
+}
+
+const WEEK = 7 * 86_400_000;
+
+/**
+ * One look at how Archivist is doing in this project: the knowledge base, the last week of analyses, which
+ * entries tasks actually meet, what lint finds, and what to do about it. Deterministic: no model call.
+ */
+export const healthText = async (io: Io, entries: Map<string, Entry>, config: Config, now: Date, extras: HealthExtras = {}): Promise<string> => {
+  const since = new Date(now.getTime() - WEEK).toISOString();
+  const active = activeEntries(entries);
+  const by = (t: string) => active.filter((e) => e.type === t).length;
+  const stale = await findStale(io, entries);
+  const queue = await listProposals(io);
+  const human = queue.filter((p) => needsHuman(p.op)).length;
+  const coreLines = Math.max(0, ((await io.read(PATHS.coreRule)) ?? "").split("\n").length - 1);
+  const areas = groupAreas(active, stale).size;
+
+  const week = (await loadAnalyses(io)).filter((a) => a.ts >= since);
+  const done = week.filter((a) => a.outcome === "done");
+  const tasks = (await loadMetrics(io)).filter((m) => m.source === "live" && m.ts >= since).length;
+  const errors = week.filter((a) => a.error).length;
+  const logWeek = (extras.log ?? []).filter((l) => l.slice(0, 24) >= since);
+  const failed = logWeek.filter((l) => l.includes(": failed:")).length;
+  const postponed = logWeek.filter((l) => l.includes(": postponed:")).length;
+  const recorded = done.reduce((s, a) => s + a.applied, 0);
+  const proposed = done.reduce((s, a) => s + a.proposals, 0);
+  const spent = week.reduce((s, a) => s + a.tokens, 0);
+
+  const usage = await loadUsage(io);
+  const met = active.filter((e) => usage[e.id]).length;
+  // Stale entries have their own line: counted once, where the fix is.
+  const neverMet = active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since);
+  const wrong = active.filter((e) => (usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0));
+  const warnings = (await lint(io, entries, config)).filter((f) => f.level === "warn");
+  const k = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
+  const lines = [
+    "# Archivist health",
+    "",
+    "## Knowledge",
+    `- ${active.length} active entries: ${by("command")} commands, ${by("gotcha")} gotchas, ${by("decision")} decisions, ${by("procedure")} procedures; ${entries.size - active.length} retired; ${stale.size} stale`,
+    `- always loaded: ${PATHS.coreRule} ${coreLines}/${config.budgets.coreLines} lines; ${areas} path-scoped rule files`,
+    `- review queue: ${queue.length}${human ? ` (${human} decisions or removals wait for you)` : ""}`,
+    "",
+    "## Last 7 days",
+    week.length || !tasks
+      ? `- ${tasks} tasks seen; ${week.length} analysed: ${done.length} fully, ${week.length - done.length} skipped as trivial`
+      : `- ${tasks} tasks seen; the analysis journal starts with Archivist 1.3.0, so these counts fill in from the next analysed task`,
+    `- recorded ${recorded} entries, proposed ${proposed}; analysis cost ${k(spent)} weighted tokens${extras.spentToday !== undefined ? ` (today ${k(extras.spentToday)} of ${k(config.analyzer.maxTokensPerDay)})` : ""}`,
+    `- problems: ${errors} analyses with model errors${extras.log ? `, ${failed} failed, ${postponed} postponed` : ""}`,
+    "",
+    "## Entries in use",
+    `- ${met} of ${active.length} met in a task (rule loaded, command run, or confirmed)`,
+    ...(neverMet.length ? [`- never met, older than a week: ${neverMet.slice(0, 5).map((e) => `\`${e.id}\` ${e.title}`).join("; ")}${neverMet.length > 5 ? ` and ${neverMet.length - 5} more` : ""}`] : []),
+    ...(wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []),
+  ];
+  if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...(warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []));
+
+  const todo: string[] = [];
+  if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
+  if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
+  if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
+  if (neverMet.length >= 3) todo.push(`${neverMet.length} entries never met in a week: archivist gc --days 7 lists them, --apply retires them`);
+  if (warnings.some((w) => !w.text.includes("stale") && !w.text.includes("judged wrong"))) todo.push("lint findings above: merge or fix them with /archivist edit or /archivist deprecate");
+  if (coreLines > config.budgets.coreLines * 0.9) todo.push(`${PATHS.coreRule} is near its budget: scope entries to paths (/archivist edit <id> --paths "…")`);
+  // Judged only on a week the journal covers: before 1.3.0 there is no journal, and silence would read as failure.
+  if (week.length >= 5 && !done.some((a) => a.applied || a.proposals)) todo.push("nothing recorded in a week of tasks: the thresholds may be too strict (analyzer.minToolCalls, apply.autoConfidence)");
+  if (!(await loadBaseline(io))) todo.push("no baseline yet: archivist baseline, so /archivist stats can show the effect");
+  lines.push("", "## What to do", ...(todo.length ? todo.map((t) => `- ${t}`) : ["- Nothing: Archivist is doing fine here."]));
+  return lines.join("\n") + "\n";
 };

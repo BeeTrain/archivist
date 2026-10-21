@@ -4,11 +4,11 @@ import { PATHS, joinPath, type Io, type Llm } from "../core/io.js";
 import { activeEntries, appendLedger, loadState } from "../core/ledger.js";
 import { redact } from "../core/privacy.js";
 import { groupAreas, renderAll } from "../core/render.js";
-import { appendMetrics, toMetrics } from "../core/metrics.js";
+import { appendAnalysis, appendMetrics, toMetrics } from "../core/metrics.js";
 import { commandsUsed, loadUsage, recordUse, saveUsage } from "../core/usage.js";
 import { expireProposals, listProposals, loadSkipped } from "../core/review.js";
 import { bm25, globToRegExp, truncate } from "../core/text.js";
-import { addUsage, emptyUsage, type Entry, type Message, type ProposedOp, type RecordSource, type Segment, type Usage } from "../core/types.js";
+import { addUsage, emptyUsage, weightedTokens, type Entry, type Message, type ProposedOp, type RecordSource, type Segment, type Usage } from "../core/types.js";
 import { validateOps } from "../core/validate.js";
 import { digestFromMessages, digestFromSegment, sliceTask } from "./digest.js";
 import { parseCuratorReply } from "./parse.js";
@@ -84,7 +84,10 @@ export const analyzeSegment = async (args: {
   recordUse(counters, { seen, used, feedback: [], known, ts });
   await saveUsage(io, counters);
 
-  if (isTrivial(signals, config)) return { kind: "skipped", reason: "trivial task", usage };
+  if (isTrivial(signals, config)) {
+    await appendAnalysis(io, { ts, outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 });
+    return { kind: "skipped", reason: "trivial task", usage };
+  }
 
   const candidates = pickCandidates(active, seg, signals.edits);
   // What the task met first, then what is relevant to it: the reflection is asked about these.
@@ -173,5 +176,14 @@ export const analyzeSegment = async (args: {
   };
   const reportPath = joinPath(PATHS.reports, `${ts.replace(/[:.]/g, "-")}.md`);
   await io.write(reportPath, reportMarkdown(report));
+  await appendAnalysis(io, {
+    ts,
+    outcome: "done",
+    applied: v.applied.filter((o) => o.op.op !== "reinforce").length,
+    proposals: proposals.length,
+    dropped: v.rejected.length,
+    tokens: weightedTokens(usage),
+    ...(error ? { error } : {}),
+  });
   return { kind: "done", report, reportPath, usage };
 };

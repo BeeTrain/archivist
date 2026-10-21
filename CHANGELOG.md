@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0 — 2026-10-22
+
+- `/archivist health` and `archivist health`: one look at how Archivist is doing in a project — the knowledge base, the last week of analyses (done, skipped, failed, postponed, cost), entries no task met, entries judged wrong, lint findings — ending in what to do, or that nothing needs doing.
+- Every analysis run is recorded in `.archivist/.local/analyses.jsonl` (outcome, entries recorded, cost, errors).
+
 ## 1.2.2 — 2026-10-22
 
 - Fix: in a project where `archivist init` never ran, `.archivist/.local/` (reports quoting prompts and session ids) was not git-ignored. Every writer now creates `.archivist/.gitignore`, or adds a `.local/` line to an existing one, before its first write under `.archivist/`.

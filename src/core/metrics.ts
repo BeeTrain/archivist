@@ -5,6 +5,33 @@ import { weightedTokens, type Usage } from "./types.js";
 
 export const METRICS = ".archivist/.local/metrics.jsonl";
 export const BASELINE = ".archivist/.local/baseline.json";
+/** One line per analysis run: what came of it and what it cost. What `health` counts. */
+export const ANALYSES = ".archivist/.local/analyses.jsonl";
+
+export interface AnalysisRecord {
+  ts: string;
+  outcome: "done" | "skipped";
+  applied: number;
+  proposals: number;
+  dropped: number;
+  /** Weighted tokens the analysis itself spent (cache reads count 0.1×). */
+  tokens: number;
+  error?: string;
+}
+
+export const appendAnalysis = async (io: Io, r: AnalysisRecord): Promise<void> => {
+  const prev = (await io.read(ANALYSES)) ?? "";
+  await io.write(ANALYSES, prev + JSON.stringify(r) + "\n");
+};
+
+export const loadAnalyses = async (io: Io): Promise<AnalysisRecord[]> =>
+  ((await io.read(ANALYSES)) ?? "").split("\n").flatMap((l) => {
+    try {
+      return l ? [JSON.parse(l) as AnalysisRecord] : [];
+    } catch {
+      return [];
+    }
+  });
 
 export interface TaskMetrics {
   ts: string;

@@ -11,7 +11,7 @@ import { ENTRY_TYPES, type EntryType } from "../core/types.js";
 import { validateOps, type Outcome } from "../core/validate.js";
 import { computeSignals } from "../analyzer/signals.js";
 import { readProjectSegments, transcriptDir } from "../adapters/claude/cli/transcript.js";
-import { gcCandidates, gcRecords, lint, recallText, statsText } from "../core/maintenance.js";
+import { gcCandidates, gcRecords, healthText, lint, recallText, statsText } from "../core/maintenance.js";
 import { BASELINE, compareText, summarize, toMetrics, type Baseline } from "../core/metrics.js";
 import { findRoot, nodeIo, uninstall } from "./node-io.js";
 import { scanCommands } from "./scan.js";
@@ -36,6 +36,7 @@ Usage: archivist <command> [--root <dir>]
   baseline [--before <date>]
                         measure the project's Claude Code sessions before Archivist (from their transcripts)
   stats                 recent tasks against the baseline, and how each entry fares
+  health                one look at how Archivist is doing here, and what to do about it
   gc [--days 60] [--apply]
                         entries with no sign of use for that long; --apply retires them
   lint                  near-duplicates, contradictions, stale entries, decisions without a reason, budgets
@@ -277,6 +278,9 @@ const main = async (): Promise<number> => {
       return 0;
     case "stats":
       console.log(await statsText(io, (await loadState(io)).entries));
+      return 0;
+    case "health":
+      console.log(await healthText(io, (await loadState(io)).entries, await loadConfig(io), new Date()));
       return 0;
     case "gc":
       await gc(io, rest);
