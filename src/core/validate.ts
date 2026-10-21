@@ -19,7 +19,12 @@ export interface Validated {
   applied: Outcome[];
   proposals: Outcome[];
   rejected: Outcome[];
+  /** Procedures seen for the first time: the caller remembers them for the next sighting. */
+  firstSightings: string[];
 }
+
+/** A workflow is longer than a fact: a few numbered steps. */
+const PROCEDURE_CHARS = 1500;
 
 /** Same type and this similar → it is the same fact: reinforce instead of adding. */
 const DUP_ENTRY = 0.6;
@@ -43,9 +48,11 @@ export const validateOps = async (args: {
   source?: EntrySource;
   /** Texts of proposals the user skipped: the same idea is not proposed again. */
   skipped?: string[];
+  /** Procedures seen in earlier tasks but not proposed yet: a workflow becomes a skill only once it repeats. */
+  procedureCandidates?: string[];
 }): Promise<Validated> => {
   const { ops, entries, io, config, now, src } = args;
-  const out: Validated = { records: [], applied: [], proposals: [], rejected: [] };
+  const out: Validated = { records: [], applied: [], proposals: [], rejected: [], firstSightings: [] };
   const paragraphs = docParagraphs(args.docs);
   const taken = new Set(entries.keys());
   let adr = nextAdr(entries.values());
@@ -71,7 +78,7 @@ export const validateOps = async (args: {
         continue;
       }
       const t = redact(truncate(String(op.title ?? "").trim(), 120));
-      const c = redact(truncate(String(op.content ?? "").trim(), config.budgets.maxContentChars));
+      const c = redact(truncate(String(op.content ?? "").trim(), op.type === "procedure" ? PROCEDURE_CHARS : config.budgets.maxContentChars));
       const r = op.rationale ? redact(truncate(String(op.rationale).trim(), config.budgets.maxContentChars)) : undefined;
       const title = t.text;
       const content = c.text;
@@ -89,6 +96,16 @@ export const validateOps = async (args: {
       if ((args.skipped ?? []).some((s) => jaccard(s, `${title} ${content}`) >= DUP_ENTRY)) {
         out.rejected.push({ op, reason: "skipped in an earlier review" });
         continue;
+      }
+      if (op.type === "procedure" && args.source !== "user") {
+        // One task doing something is an anecdote; a skill is worth its line in every session only if it repeats.
+        if (!(args.procedureCandidates ?? []).some((s) => jaccard(s, `${title} ${content}`) >= 0.4)) {
+          out.firstSightings.push(`${title} ${content}`);
+          out.rejected.push({ op, reason: "procedure seen once: waiting for a repeat" });
+          continue;
+        }
+        confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+        notes.push("seen in an earlier task too");
       }
 
       const dup = [...entries.values()].find(
@@ -141,6 +158,7 @@ export const validateOps = async (args: {
         updated: now,
         ...(op.type === "decision" ? { adr: adr } : {}),
         ...(supersedes.length ? { supersedes } : {}),
+        ...(op.savings && (op.savings.toolCalls || op.savings.tokens) ? { savings: { toolCalls: Number(op.savings.toolCalls) || 0, tokens: Number(op.savings.tokens) || 0 } } : {}),
         reinforced: 0,
       };
       const o: Outcome = { op, id, type: op.type, title, ...(notes.length ? { reason: notes.join("; ") } : {}) };

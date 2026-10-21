@@ -58,7 +58,7 @@ export const appendLedger = async (io: Io, records: LedgerRecord[]): Promise<voi
   await io.write(PATHS.ledger, prev + sep + records.map((r) => JSON.stringify(r)).join("\n") + "\n");
 };
 
-const PREFIX: Record<EntryType, string> = { command: "cmd", gotcha: "gk", decision: "dec" };
+const PREFIX: Record<EntryType, string> = { command: "cmd", gotcha: "gk", decision: "dec", procedure: "proc" };
 
 export const newId = (type: EntryType, taken: Set<string>): string => {
   for (;;) {

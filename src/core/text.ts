@@ -27,13 +27,23 @@ export const slug = (s: string, max = 48): string =>
 
 export const truncate = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
 
+/**
+ * Tokens for search: compound words split (`dev-мода` → `dev`, `мода`) and cut to a 5-letter stem, a crude
+ * stemmer that is enough to match `мод`/`мода`/`модов` or `reload`/`reloads` in a few dozen entries.
+ */
+export const searchTokens = (s: string): string[] =>
+  tokens(s)
+    .flatMap((t) => t.split(/[-./:@+]+/))
+    .filter((t) => t.length > 1)
+    .map((t) => t.slice(0, 5));
+
 /** Scores docs against a query; returns indexes sorted by score, best first, zero scores dropped. */
 export const bm25 = (docs: string[], query: string, k1 = 1.2, b = 0.75): { index: number; score: number }[] => {
-  const docTokens = docs.map(tokens);
+  const docTokens = docs.map(searchTokens);
   const avg = docTokens.reduce((s, d) => s + d.length, 0) / Math.max(docTokens.length, 1);
   const df = new Map<string, number>();
   for (const d of docTokens) for (const t of new Set(d)) df.set(t, (df.get(t) ?? 0) + 1);
-  const q = [...new Set(tokens(query))];
+  const q = [...new Set(searchTokens(query))];
   return docTokens
     .map((d, index) => {
       const tf = new Map<string, number>();

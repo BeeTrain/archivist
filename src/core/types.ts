@@ -1,6 +1,7 @@
 // Agent-agnostic data model. No Node or Claude Code APIs here: everything outside goes through Io / Llm.
 
-export const ENTRY_TYPES = ["command", "gotcha", "decision"] as const;
+/** procedure: a repeated multi-step workflow; rendered as a skill, recorded only after a repeat and a review. */
+export const ENTRY_TYPES = ["command", "gotcha", "decision", "procedure"] as const;
 export type EntryType = (typeof ENTRY_TYPES)[number];
 
 export type EntryStatus = "active" | "deprecated";
@@ -34,6 +35,8 @@ export interface Entry {
   supersedes?: string[];
   deprecatedReason?: string;
   reinforced: number;
+  /** The analyzer's estimate of what the fact saves a similar task; checked against metrics by `archivist stats`. */
+  savings?: Savings;
 }
 
 /** Provenance kept in the committed ledger: the task's segment id only. Session ids stay on the machine. */

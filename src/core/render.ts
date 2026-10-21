@@ -54,7 +54,12 @@ const isScoped = (e: Entry): boolean => Boolean(e.scope?.paths.length) && e.type
 
 /** The always-loaded rule: what applies anywhere in the project, plus pointers to decisions. */
 export const renderCore = (entries: Entry[], config: Config, stale = new Set<string>()): string => {
-  const head = [GENERATED, "# Project knowledge (Archivist)", "", "Facts learned in earlier sessions. Prefer them over re-discovering; if one is wrong, say so."];
+  const head = [
+    GENERATED,
+    "# Project knowledge (Archivist)",
+    "",
+    "Facts learned in earlier sessions. Prefer them over re-discovering; if one is wrong, say so. Before exploring, try `archivist recall <words>`.",
+  ];
   return fill(head, live(entries, stale).filter((e) => !isScoped(e)), config.budgets.coreLines).lines.join("\n") + "\n";
 };
 
@@ -62,18 +67,26 @@ export const renderCore = (entries: Entry[], config: Config, stale = new Set<str
  * Commands and gotchas that only matter for some paths go to their own rule file with `paths:` frontmatter:
  * Claude Code loads it the first time the agent reads or edits a matching file, and not before.
  */
-export const renderAreas = (entries: Entry[], config: Config, stale = new Set<string>()): Map<string, string> => {
+export const groupAreas = (entries: Entry[], stale = new Set<string>()): Map<string, { paths: string[]; items: Entry[] }> => {
   const groups = new Map<string, Entry[]>();
   for (const e of live(entries, stale).filter(isScoped)) {
     const key = [...e.scope!.paths].sort().join("\n");
     groups.set(key, [...(groups.get(key) ?? []), e]);
   }
-  const files = new Map<string, string>();
+  const areas = new Map<string, { paths: string[]; items: Entry[] }>();
   for (const [key, items] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
     const paths = key.split("\n");
     const base = slug(paths[0]!.replace(/[*?{].*$/, "").replace(/\/+$/, "") || "area");
     let name = joinPath(PATHS.rulesDir, `${base}.md`);
-    for (let i = 2; files.has(name) || name === PATHS.coreRule; i++) name = joinPath(PATHS.rulesDir, `${base}-${i}.md`);
+    for (let i = 2; areas.has(name) || name === PATHS.coreRule; i++) name = joinPath(PATHS.rulesDir, `${base}-${i}.md`);
+    areas.set(name, { paths, items });
+  }
+  return areas;
+};
+
+export const renderAreas = (entries: Entry[], config: Config, stale = new Set<string>()): Map<string, string> => {
+  const files = new Map<string, string>();
+  for (const [name, { paths, items }] of groupAreas(entries, stale)) {
     const head = ["---", "paths:", ...paths.map((p) => `  - ${JSON.stringify(p)}`), "---", GENERATED, `# Project knowledge for ${paths.join(", ")} (Archivist)`];
     files.set(name, fill(head, items, config.budgets.pathFileLines).lines.join("\n") + "\n");
   }
@@ -112,6 +125,19 @@ export const renderAdr = (e: Entry): string => {
   ].join("\n");
 };
 
+/** A skill's directory name doubles as its command: ASCII only, else the entry id. */
+export const skillPath = (e: Entry): string => {
+  const ascii = slug(e.title, 40).replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/-{2,}/g, "-");
+  return joinPath(PATHS.skillsDir, `archivist-${ascii.length >= 3 ? ascii : e.id}`, "SKILL.md");
+};
+
+/** A repeated workflow, as a skill: its name and description sit in every session's skill list, the steps load on use. */
+export const renderSkill = (e: Entry): string => {
+  const name = skillPath(e).split("/").at(-2)!;
+  const description = oneLine(`${e.title}.${e.rationale ? ` Use when ${e.rationale.replace(/^use when\s+/i, "")}` : ""}`);
+  return ["---", `name: ${name}`, `description: ${JSON.stringify(description)}`, "---", GENERATED, `# ${e.title}`, "", e.content.trim(), ""].join("\n");
+};
+
 /** Every generated file and its content. */
 export const renderViews = (entries: Map<string, Entry>, config: Config, stale = new Set<string>()): Map<string, string> => {
   const all = [...entries.values()];
@@ -120,6 +146,7 @@ export const renderViews = (entries: Map<string, Entry>, config: Config, stale =
   for (const [path, text] of renderAreas(all, config, stale)) views.set(path, text);
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
+  for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
   return views;
 };
 
@@ -154,15 +181,17 @@ export const writeViews = async (io: Io, views: Map<string, string>): Promise<st
 /** Removes generated files no view produces any more (an area emptied, an ADR renamed). Never touches a file it did not write. */
 export const pruneViews = async (io: Io, views: Map<string, string>): Promise<string[]> => {
   if (!io.remove) return [];
+  const files: string[] = [];
+  for (const dir of [PATHS.rulesDir, PATHS.decisions])
+    for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
+  for (const dir of await io.list(PATHS.skillsDir)) if (dir.startsWith("archivist-")) files.push(joinPath(PATHS.skillsDir, dir, "SKILL.md"));
+
   const removed: string[] = [];
-  for (const dir of [PATHS.rulesDir, PATHS.decisions]) {
-    for (const name of await io.list(dir)) {
-      const path = joinPath(dir, name);
-      if (!name.endsWith(".md") || views.has(path)) continue;
-      if (!((await io.read(path)) ?? "").slice(0, 600).includes(GENERATED)) continue;
-      await io.remove(path);
-      removed.push(path);
-    }
+  for (const path of files) {
+    if (views.has(path) || !(await io.exists(path))) continue;
+    if (!((await io.read(path)) ?? "").slice(0, 600).includes(GENERATED)) continue;
+    await io.remove(path);
+    removed.push(path);
   }
   return removed;
 };

@@ -8,6 +8,10 @@ import { findStale, renderAll } from "../core/render.js";
 import { addEntry, applyProposals, listProposals, pick, reviewText, skipProposals } from "../core/review.js";
 import { ENTRY_TYPES, type EntryType } from "../core/types.js";
 import { validateOps, type Outcome } from "../core/validate.js";
+import { computeSignals } from "../analyzer/signals.js";
+import { readProjectSegments, transcriptDir } from "../adapters/claude/cli/transcript.js";
+import { gcCandidates, gcRecords, lint, recallText, statsText } from "../core/maintenance.js";
+import { BASELINE, compareText, summarize, toMetrics, type Baseline } from "../core/metrics.js";
 import { findRoot, nodeIo } from "./node-io.js";
 import { scanCommands } from "./scan.js";
 
@@ -23,6 +27,13 @@ Usage: archivist <command> [--root <dir>]
   skip <n|1,3|all>      drop proposals; the same idea is not proposed again
   add --type <command|gotcha|decision> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
                         record a fact by hand (decisions need --why)
+  recall <words>        the recorded entries that match: ask this before exploring
+  baseline [--before <date>]
+                        measure the project's Claude Code sessions before Archivist (from their transcripts)
+  stats                 recent tasks against the baseline, and how each entry fares
+  gc [--days 60] [--apply]
+                        entries with no sign of use for that long; --apply retires them
+  lint                  near-duplicates, contradictions, stale entries, decisions without a reason, budgets
   render                regenerate the rule files, index and ADRs from the ledger
   doctor                check the setup
 `;
@@ -130,6 +141,38 @@ const review = async (io: Io, verb: "apply" | "skip", which: string | undefined)
   return 0;
 };
 
+const baseline = async (io: Io, args: string[]): Promise<void> => {
+  const o = options(args);
+  const created = [...(await loadState(io)).entries.values()].map((e) => e.created).sort()[0];
+  // Before the first entry, sessions ran without Archivist's knowledge: that is the "before".
+  const before = new Date(o.before ?? created ?? now());
+  const { sessions, segments } = await readProjectSegments(io.root, before);
+  const metrics = segments.map((s) => toMetrics(computeSignals(s), new Date(s.startedAt).toISOString(), "baseline"));
+  const b: Baseline = { createdAt: now(), before: before.toISOString(), sessions, summary: summarize(metrics) };
+  await io.write(BASELINE, JSON.stringify(b, null, 2) + "\n");
+  console.log(`Baseline: ${b.summary.tasks} tasks from ${sessions} sessions before ${b.before.slice(0, 10)} (${transcriptDir(io.root)})`);
+  console.log(compareText(undefined, b.summary).replace(/^No baseline yet.*\n\n/, "").replace("now (", "before ("));
+};
+
+const gc = async (io: Io, args: string[]): Promise<void> => {
+  const o = options(args);
+  const days = Number(o.days ?? 60);
+  const state = await loadState(io);
+  const quiet = await gcCandidates(io, state.entries, days, new Date());
+  if (!quiet.length) {
+    console.log(`Every entry showed a sign of use in the last ${days} days.`);
+    return;
+  }
+  for (const e of quiet) console.log(`  \`${e.id}\` [${e.type}] ${e.title}`);
+  if (!args.includes("--apply")) {
+    console.log(`${quiet.length} entries unused for ${days} days. Run with --apply to retire them (they stay in the ledger).`);
+    return;
+  }
+  await appendLedger(io, gcRecords(quiet, days, now()));
+  printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
+  console.log(`retired ${quiet.length} entries`);
+};
+
 const claudeVersion = (): number[] | undefined => {
   try {
     const out = execFileSync("claude", ["--version"], { encoding: "utf8", timeout: 10_000 });
@@ -205,6 +248,24 @@ const main = async (): Promise<number> => {
     case "render":
       printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
       return 0;
+    case "recall":
+      console.log(recallText((await loadState(io)).entries, rest.join(" ")));
+      return 0;
+    case "baseline":
+      await baseline(io, rest);
+      return 0;
+    case "stats":
+      console.log(await statsText(io, (await loadState(io)).entries));
+      return 0;
+    case "gc":
+      await gc(io, rest);
+      return 0;
+    case "lint": {
+      const findings = await lint(io, (await loadState(io)).entries, await loadConfig(io));
+      for (const f of findings) console.log(`${f.level === "warn" ? "✘" : "·"} ${f.text}`);
+      if (!findings.length) console.log("✔ nothing to report");
+      return findings.some((f) => f.level === "warn") ? 1 : 0;
+    }
     case "doctor":
       return (await doctor(io)) ? 0 : 1;
     case undefined:

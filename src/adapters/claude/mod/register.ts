@@ -12,6 +12,7 @@ import { PATHS, joinPath, relPath, type Io, type Llm, type LlmReply } from '../.
 import { activeEntries, loadState } from '../../../core/ledger.js'
 import { isExcluded, redact } from '../../../core/privacy.js'
 import { applyProposals, describeOp, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
+import { recallText, statsText } from '../../../core/maintenance.js'
 import { truncate } from '../../../core/text.js'
 import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
 import { analyzeSegment } from '../../../analyzer/pipeline.js'
@@ -252,7 +253,7 @@ export function register(on: On): void {
     await $.command.register({
       name: 'archivist',
       description: 'Archivist: what it learned from the last task (report) or the knowledge base status (status)',
-      argumentHint: '[report|status|review|apply <n>|skip <n>|log]',
+      argumentHint: '[report|status|stats|recall <words>|review|apply <n>|skip <n>|log]',
     })
 
     // Tasks waiting for analysis: this session's (a module reload dropped their timer; the open one is closed
@@ -358,6 +359,8 @@ export function register(on: On): void {
       return { text: lines.length ? lines.slice(-30).join('\n') : 'Archivist log is empty.' }
     }
     if (verb === 'review') return { text: reviewText(await listProposals(io)) }
+    if (verb === 'stats') return { text: await statsText(io, (await loadState(io)).entries) }
+    if (verb === 'recall') return { text: recallText((await loadState(io)).entries, rest.join(' ')) }
     if (verb === 'apply' || verb === 'skip') {
       const chosen = pick(await listProposals(io), rest.join(','))
       if (!chosen.length) return { text: `Usage: /archivist ${verb} <n|1,3|all> — numbers from /archivist review.` }

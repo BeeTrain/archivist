@@ -1,4 +1,5 @@
 import type { ProposedOp } from "../core/types.js";
+import type { Feedback } from "../core/usage.js";
 
 /** Finds the first balanced JSON object in a model reply (it may wrap it in prose or a code fence). */
 export const extractJson = (text: string): unknown => {
@@ -29,11 +30,17 @@ export const extractJson = (text: string): unknown => {
 export interface CuratorReply {
   summary: string;
   ops: ProposedOp[];
+  feedback: Feedback[];
 }
 
 export const parseCuratorReply = (text: string): CuratorReply | undefined => {
-  const json = extractJson(text) as { summary?: unknown; ops?: unknown } | undefined;
+  const json = extractJson(text) as { summary?: unknown; ops?: unknown; feedback?: unknown } | undefined;
   if (!json || typeof json !== "object") return undefined;
   const ops = Array.isArray(json.ops) ? (json.ops.filter((o) => o && typeof o === "object" && typeof (o as { op?: unknown }).op === "string") as ProposedOp[]) : [];
-  return { summary: typeof json.summary === "string" ? json.summary : "", ops };
+  const feedback = Array.isArray(json.feedback)
+    ? (json.feedback as { id?: unknown; verdict?: unknown }[])
+        .filter((f) => f && typeof f.id === "string" && (f.verdict === "helpful" || f.verdict === "harmful"))
+        .map((f) => ({ id: f.id as string, verdict: f.verdict as Feedback["verdict"] }))
+    : [];
+  return { summary: typeof json.summary === "string" ? json.summary : "", ops, feedback };
 };

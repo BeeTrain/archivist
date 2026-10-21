@@ -3,10 +3,12 @@ import type { Config } from "../core/config.js";
 import { PATHS, joinPath, type Io, type Llm } from "../core/io.js";
 import { activeEntries, appendLedger, loadState } from "../core/ledger.js";
 import { redact } from "../core/privacy.js";
-import { renderAll } from "../core/render.js";
-import { loadSkipped } from "../core/review.js";
+import { groupAreas, renderAll } from "../core/render.js";
+import { appendMetrics, toMetrics } from "../core/metrics.js";
+import { commandsUsed, loadUsage, recordUse, saveUsage } from "../core/usage.js";
+import { listProposals, loadSkipped } from "../core/review.js";
 import { bm25, globToRegExp, truncate } from "../core/text.js";
-import { addUsage, emptyUsage, type Entry, type Message, type Segment, type Usage } from "../core/types.js";
+import { addUsage, emptyUsage, type Entry, type Message, type ProposedOp, type RecordSource, type Segment, type Usage } from "../core/types.js";
 import { validateOps } from "../core/validate.js";
 import { digestFromMessages, digestFromSegment, sliceTask } from "./digest.js";
 import { parseCuratorReply } from "./parse.js";
@@ -22,6 +24,16 @@ export type AnalysisResult =
   | { kind: "done"; report: Report; reportPath: string; usage: Usage };
 
 const toUsage = (u: Partial<Usage> | undefined): Usage => addUsage(emptyUsage(), u ?? {});
+
+const CANDIDATES = ".archivist/.local/procedure-candidates.jsonl";
+
+const readLines = async (io: Io, path: string): Promise<string[]> => ((await io.read(path)) ?? "").split("\n").filter(Boolean);
+
+const writeProposal = async (io: Io, ts: string, i: number, src: RecordSource, op: ProposedOp, reason?: string): Promise<string> => {
+  const path = joinPath(PATHS.proposals, `${ts.replace(/[:.]/g, "-")}-${i}.json`);
+  await io.write(path, JSON.stringify({ ts, src, op, reason: reason ?? null }, null, 2) + "\n");
+  return path;
+};
 
 /** Entries the curator should see: scoped to edited files, plus BM25 over the task's words. Never the whole base. */
 export const pickCandidates = (entries: Entry[], seg: Segment, edits: string[], k = TOP_K): Entry[] => {
@@ -54,13 +66,29 @@ export const analyzeSegment = async (args: {
   now: Date;
 }): Promise<AnalysisResult> => {
   const { io, llm, config, segment: seg, now } = args;
+  const ts = now.toISOString();
   const signals = computeSignals(seg);
   let usage = emptyUsage();
-  if (isTrivial(signals, config)) return { kind: "skipped", reason: "trivial task", usage };
+  // Every task is measured, trivial ones too: the metrics are what tells whether the knowledge pays off.
+  await appendMetrics(io, toMetrics(signals, ts, "live"));
 
   const state = await loadState(io);
   const active = activeEntries(state.entries);
+  const known = new Set(active.map((e) => e.id));
+  // Entries the task demonstrably met: rule files Claude Code loaded for it, and recorded commands it ran.
+  const loaded = new Set(signals.rulesLoaded);
+  const seen = [...groupAreas(active)].filter(([path]) => loaded.has(path)).flatMap(([, a]) => a.items.map((e) => e.id));
+  const used = commandsUsed(active, seg.tools);
+  const counters = await loadUsage(io);
+  recordUse(counters, { seen, used, feedback: [], known, ts });
+  await saveUsage(io, counters);
+
+  if (isTrivial(signals, config)) return { kind: "skipped", reason: "trivial task", usage };
+
   const candidates = pickCandidates(active, seg, signals.edits);
+  // What the task met first, then what is relevant to it: the reflection is asked about these.
+  const inPlay: Entry[] = [];
+  for (const e of [...[...seen, ...used].map((id) => state.entries.get(id)!), ...candidates]) if (!inPlay.includes(e) && inPlay.length < 20) inPlay.push(e);
 
   // 1. Notes: the agent's own reflection over its cached context, or a digest for the cheap model.
   let notes = "";
@@ -70,7 +98,7 @@ export const analyzeSegment = async (args: {
   const tooBig = (args.contextTokens ?? 0) > config.analyzer.forkMaxContextTokens;
   const note = tooBig ? `reflect skipped: context ${args.contextTokens} tokens > ${config.analyzer.forkMaxContextTokens}` : undefined;
   if (config.analyzer.reflect === "fork" && llm.reflect && args.messages && !tooBig) {
-    const r = await llm.reflect(reflectPrompt(seg.prompts[0], config.language));
+    const r = await llm.reflect(reflectPrompt(seg.prompts[0], config.language, inPlay));
     reflectUsage = toUsage(r.usage);
     usage = addUsage(usage, reflectUsage);
     if (r.ok && r.text.trim()) {
@@ -83,7 +111,7 @@ export const analyzeSegment = async (args: {
   notes = redact(notes).text;
 
   // 2. Curate: notes → ops against the relevant existing entries.
-  const c = await llm.complete({ system: CURATE_SYSTEM, prompt: curatePrompt({ notes, notesKind, signals: signalsText(signals), candidates, language: config.language }), maxTokens: 2500 });
+  const c = await llm.complete({ system: CURATE_SYSTEM, prompt: curatePrompt({ notes, notesKind, signals: signalsText(signals), candidates: inPlay, language: config.language }), maxTokens: 2500 });
   const curateUsage = toUsage(c.usage);
   usage = addUsage(usage, curateUsage);
   const reply = c.ok ? parseCuratorReply(c.text) : undefined;
@@ -91,17 +119,37 @@ export const analyzeSegment = async (args: {
   else if (!reply) error = [error, "curate: reply was not JSON"].filter(Boolean).join("; ");
 
   // 3. Validate, apply, render.
-  const ts = now.toISOString();
   const src = { segment: seg.id };
-  const v = await validateOps({ ops: reply?.ops ?? [], entries: state.entries, io, config, docs: await readDocs(io), now: ts, src, skipped: await loadSkipped(io) });
+  const v = await validateOps({
+    ops: reply?.ops ?? [],
+    entries: state.entries,
+    io,
+    config,
+    docs: await readDocs(io),
+    now: ts,
+    src,
+    skipped: await loadSkipped(io),
+    procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => (JSON.parse(l) as { text: string }).text),
+  });
   await appendLedger(io, v.records);
+  if (v.firstSightings.length)
+    await io.write(CANDIDATES, ((await io.read(CANDIDATES)) ?? "") + v.firstSightings.map((text) => JSON.stringify({ ts, text })).join("\n") + "\n");
   const { written, removed } = await renderAll(io, (await loadState(io)).entries, config);
   written.push(...removed.map((r) => `${r} (removed)`));
-  for (const [i, p] of v.proposals.entries()) {
-    const path = joinPath(PATHS.proposals, `${ts.replace(/[:.]/g, "-")}-${i}.json`);
-    await io.write(path, JSON.stringify({ ts, src, op: p.op, reason: p.reason ?? null }, null, 2) + "\n");
-    written.push(path);
+
+  // 4. Self-correction: what the agent says helped or misled feeds the counters; a fact that keeps misleading
+  // is put up for removal (a human decides: removing knowledge is the riskier edit).
+  const reinforced = v.applied.filter((o) => o.op.op === "reinforce" && o.id).map((o) => o.id!);
+  const harmful = recordUse(counters, { seen: [], used: reinforced, feedback: reply?.feedback ?? [], known, ts });
+  await saveUsage(io, counters);
+  const proposals = [...v.proposals];
+  const pending = new Set((await listProposals(io)).filter((p) => p.op.op === "deprecate").map((p) => ("id" in p.op ? p.op.id : "")));
+  for (const id of harmful.filter((h) => !pending.has(h))) {
+    const e = state.entries.get(id)!;
+    const reason = `judged wrong in ${counters[id]!.harmful} tasks, helpful in ${counters[id]!.helpful}`;
+    proposals.push({ op: { op: "deprecate", id, reason, confidence: 0.7 }, id, type: e.type, title: e.title, reason });
   }
+  for (const [i, p] of proposals.entries()) written.push(await writeProposal(io, ts, i, src, p.op, p.reason));
 
   const report: Report = {
     ts,
@@ -111,7 +159,7 @@ export const analyzeSegment = async (args: {
     summary: reply?.summary ?? "",
     signals,
     applied: v.applied,
-    proposals: v.proposals,
+    proposals,
     rejected: v.rejected,
     written,
     analysis: { notesKind, ...(reflectUsage ? { reflect: reflectUsage } : {}), curate: curateUsage, ...(note ? { note } : {}), ...(error ? { error } : {}) },

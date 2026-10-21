@@ -7,7 +7,7 @@ import type { Entry } from "../core/types.js";
  */
 const languageRule = (language: string, auto: string): string => (language === "auto" ? auto : `write in ${language}`);
 
-export const reflectPrompt = (firstPrompt: string | undefined, language = "auto"): string =>
+export const reflectPrompt = (firstPrompt: string | undefined, language = "auto", entries: Entry[] = []): string =>
   [
     "[Archivist plugin — a side question, not a task. Do not continue the work and do not call tools.]",
     "",
@@ -20,6 +20,13 @@ export const reflectPrompt = (firstPrompt: string | undefined, language = "auto"
     "GOTCHAS: pitfalls and non-obvious constraints you hit: where (file or path) and how to avoid them.",
     "DECISIONS: decisions made in this task: what was chosen, why, which alternatives were rejected; with files.",
     "WASTE: where steps or tokens were wasted, and which single note would have prevented it.",
+    "PROCEDURE: if the task followed a multi-step workflow likely to recur (release, migration, adding an endpoint), its steps in order; else «—».",
+    ...(entries.length
+      ? [
+          "ENTRIES: these notes from earlier sessions were available. Name the ids you actually relied on (USED) and any that were wrong or misled you (WRONG), with one reason each:",
+          ...entries.map((e) => `  ${e.id}: ${e.title}`),
+        ]
+      : []),
     "",
     "Rules: short bullets; give a file path as evidence when there is one; invent nothing; write «—» for an empty section;",
     `no secrets, tokens or personal data; no overview of the codebase; at most 25 lines; ${languageRule(language, "write in the language of the user's request")}.`,
@@ -37,17 +44,20 @@ export const CURATE_SYSTEM = [
   "- A decision needs a rationale (why, and what was rejected).",
   "- confidence: 0.9+ only for facts directly confirmed in the task (a command that ran, a decision the user approved); 0.5–0.7 for plausible but unverified; below 0.5 do not propose.",
   "- Most tasks teach nothing durable: then return no ops.",
+  "- procedure: only for a multi-step workflow that is likely to recur; content is its numbered steps (exact commands), rationale says when to use it.",
+  "- feedback: for existing entries the notes say were USED (helpful) or WRONG (harmful). Never guess: no mention, no feedback.",
   "",
   "Answer with ONE JSON object and nothing else:",
   '{"summary": "<one line: what this task taught, or why nothing>",',
   ' "ops": [',
-  '  {"op":"add","type":"command|gotcha|decision","title":"<≤8 words>","content":"<1–2 lines>","rationale":"<why, decisions only>",',
+  '  {"op":"add","type":"command|gotcha|decision|procedure","title":"<≤8 words>","content":"<1–2 lines; numbered steps for a procedure>","rationale":"<why for a decision; when to use for a procedure>",',
   '   "scope":{"paths":["src/db/**"]},"evidence":[{"file":"<project-relative path>","anchor":"<script/symbol/heading>"}],',
   '   "confidence":0.0,"supersedes":["<id>"],"savings":{"toolCalls":0,"tokens":0}},',
   '  {"op":"update","id":"<id>","content":"<new content>","confidence":0.0},',
   '  {"op":"reinforce","id":"<id>"},',
   '  {"op":"deprecate","id":"<id>","reason":"<why>","confidence":0.0}',
-  " ]}",
+  " ],",
+  ' "feedback": [{"id":"<id>","verdict":"helpful|harmful"}]}',
   "Omit optional fields you have nothing for. savings: your estimate of tool calls and tokens a future similar task saves.",
   "Write titles and content in the language of the notes.",
 ].join("\n");

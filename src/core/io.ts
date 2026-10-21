@@ -34,6 +34,7 @@ export const PATHS = {
   proposals: ".archivist/.local/proposals",
   gitignore: ".archivist/.gitignore",
   rulesDir: ".claude/rules/archivist",
+  skillsDir: ".claude/skills",
   coreRule: ".claude/rules/archivist/core.md",
 } as const;
 
