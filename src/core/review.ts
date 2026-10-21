@@ -133,7 +133,7 @@ export interface EntryEdit {
   paths?: string[];
 }
 
-type Changed = { ok: true; entry: Entry; written: string[] } | { ok: false; reason: string };
+type Changed = { ok: true; entry: Entry; written: string[]; removed: string[] } | { ok: false; reason: string };
 
 /** `--title`, `--content`, `--why`, `--paths` as an edit; a bare or empty `--paths` clears the scope. */
 export const editFromOptions = (o: Record<string, string>): EntryEdit => ({
@@ -163,7 +163,7 @@ export const editEntry = async (io: Io, config: Config, id: string, edit: EntryE
   await appendLedger(io, [{ v: 1, ts: now, op: "update", id, patch }]);
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
-  return { ok: true, entry: after.entries.get(id)!, written: [...r.written, ...r.removed] };
+  return { ok: true, entry: after.entries.get(id)!, written: r.written, removed: r.removed };
 };
 
 /** Retires an entry: it leaves the rule files and stays in the ledger with the reason. */
@@ -174,5 +174,5 @@ export const deprecateEntry = async (io: Io, config: Config, id: string, reason:
   await appendLedger(io, [{ v: 1, ts: now, op: "deprecate", id, reason: redact(reason.trim()).text }]);
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
-  return { ok: true, entry: after.entries.get(id)!, written: [...r.written, ...r.removed] };
+  return { ok: true, entry: after.entries.get(id)!, written: r.written, removed: r.removed };
 };

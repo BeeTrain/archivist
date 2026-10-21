@@ -143,7 +143,7 @@ const change = async (io: Io, verb: "edit" | "deprecate", args: string[]): Promi
     return 1;
   }
   console.log(`${verb === "edit" ? "~" : "−"} [${r.entry.type}] ${r.entry.title} \`${r.entry.id}\``);
-  printRender({ written: r.written, removed: [] });
+  printRender(r);
   return 0;
 };
 

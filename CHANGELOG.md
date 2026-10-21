@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2 — 2026-10-22
+
+- Dedupe catches paraphrases: similarity over word stems (thresholds measured on duplicates the analyzer let through), across a command and a gotcha stating the same fact; two commands that run different code stay apart.
+- Dedupe against the docs: a fact covered by three consecutive lines of CLAUDE.md, AGENTS.md or README, or a command whose every code span the docs already spell out, is dropped.
+- The curator no longer proposes temporary state or to-dos.
+- `edit`/`deprecate` report removed files separately from written ones.
+
 ## 1.1.1 — 2026-10-22
 
 - Fix: the notice under the next answer repeated the whole answer before Archivist's summary; it now holds the summary only.

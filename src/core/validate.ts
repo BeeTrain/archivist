@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import type { Io } from "./io.js";
 import { newId, nextAdr } from "./ledger.js";
 import { isExcluded, redact } from "./privacy.js";
-import { jaccard, truncate } from "./text.js";
+import { coverage, firstCode, jaccard, stemSimilarity, truncate } from "./text.js";
 import { ENTRY_TYPES, type Entry, type EntrySource, type EntryType, type LedgerRecord, type ProposedOp, type RecordSource } from "./types.js";
 
 export interface Outcome {
@@ -26,10 +26,43 @@ export interface Validated {
 /** A workflow is longer than a fact: a few numbered steps. */
 const PROCEDURE_CHARS = 1500;
 
-/** Same type and this similar → it is the same fact: reinforce instead of adding. */
+/** Same type and this similar in words → it is the same fact: reinforce instead of adding. */
 const DUP_ENTRY = 0.6;
+/**
+ * The same fact paraphrased: thresholds measured on real duplicates the analyzer let through (stem Jaccard
+ * 0.36–0.45, overlap 0.56–0.83) against distinct entries of one project (Jaccard ≤ 0.40 only between two
+ * different commands, which the command check below tells apart).
+ */
+const PARAPHRASE = { jaccard: 0.35, overlap: 0.55 };
 /** This similar to a paragraph of existing docs → already documented, adding it only costs context. */
 const DUP_DOC = 0.6;
+/** This much of a fact's stems found in three consecutive lines of the docs → it is already written there. */
+const DOC_COVERAGE = 0.6;
+
+/** Kinds that can state the same fact: a pitfall and a command often do; a decision or a workflow does not. */
+const family = (t: EntryType): string => (t === "command" || t === "gotcha" ? "fact" : t);
+
+/** The existing entry a new one repeats, if any: the same words, or the same fact in other words. */
+const findDuplicate = (entries: Iterable<Entry>, type: EntryType, title: string, content: string): Entry | undefined => {
+  const text = `${title} ${content}`;
+  let best: { e: Entry; score: number } | undefined;
+  for (const e of entries) {
+    if (e.status !== "active" || family(e.type) !== family(type)) continue;
+    const other = `${e.title} ${e.content}`;
+    if (e.type === type && jaccard(other, text) >= DUP_ENTRY) return e;
+    // Two commands that run different things are different facts, however alike their words.
+    if (e.type === "command" && type === "command" && firstCode(e.content) && firstCode(content) && firstCode(e.content) !== firstCode(content)) continue;
+    const s = stemSimilarity(other, text);
+    if (s.jaccard >= PARAPHRASE.jaccard && s.overlap >= PARAPHRASE.overlap && (!best || s.jaccard > best.score)) best = { e, score: s.jaccard };
+  }
+  return best?.e;
+};
+
+/** Three-line windows of the docs: a fact is often stated over a table row and the note under it. */
+const docWindows = (docs: string[]): string[] => {
+  const lines = docs.flatMap((d) => d.split("\n")).map((l) => l.trim()).filter((l) => l.length > 20);
+  return lines.map((_, i) => lines.slice(i, i + 3).join(" "));
+};
 
 const clamp01 = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
 
@@ -54,6 +87,7 @@ export const validateOps = async (args: {
   const { ops, entries, io, config, now, src } = args;
   const out: Validated = { records: [], applied: [], proposals: [], rejected: [], firstSightings: [] };
   const paragraphs = docParagraphs(args.docs);
+  const windows = docWindows(args.docs);
   const taken = new Set(entries.keys());
   let adr = nextAdr(entries.values());
   const touched = new Set<string>();
@@ -108,9 +142,7 @@ export const validateOps = async (args: {
         notes.push("seen in an earlier task too");
       }
 
-      const dup = [...entries.values()].find(
-        (e) => e.status === "active" && e.type === op.type && jaccard(`${e.title} ${e.content}`, `${title} ${content}`) >= DUP_ENTRY,
-      );
+      const dup = findDuplicate(entries.values(), op.type, title, content);
       if (dup) {
         if (!touched.has(dup.id)) {
           touched.add(dup.id);
@@ -119,7 +151,13 @@ export const validateOps = async (args: {
         }
         continue;
       }
-      if (paragraphs.some((p) => jaccard(p, `${title} ${content}`) >= DUP_DOC)) {
+      const fact = `${title} ${content}`;
+      const tiny = new Set(fact.match(/\S+/g) ?? []).size < 4;
+      // A command whose every code span the docs already spell out is documented, whatever words surround it.
+      // Every span counts, a lone path too: `/archivist log` in the README does not document where the store is.
+      const codes = op.type === "command" ? [...content.matchAll(/`([^`]+)`/g)].map((m) => m[1]!.replace(/\s+/g, " ").trim()).filter((c) => c.length >= 3) : [];
+      const codeInDocs = codes.some((c) => c.includes(" ")) && codes.every((c) => args.docs.some((d) => d.includes(c)));
+      if (codeInDocs || paragraphs.some((p) => jaccard(p, fact) >= DUP_DOC) || (!tiny && windows.some((w) => coverage(fact, w) >= DOC_COVERAGE))) {
         out.rejected.push({ op, reason: "already in project docs" });
         continue;
       }

@@ -42,7 +42,7 @@ describe("edit and deprecate", () => {
   it("clears a scope, moving the fact to the always-loaded rule and pruning the emptied file", async () => {
     const io = await setup();
     const r = await editEntry(io, config(), "gk-1", { paths: [] }, ts);
-    expect(r.ok && r.written).toEqual([PATHS.coreRule, PATHS.index, ".claude/rules/archivist/src-mod.md"]);
+    expect(r.ok && [r.written, r.removed]).toEqual([[PATHS.coreRule, PATHS.index], [".claude/rules/archivist/src-mod.md"]]);
     expect(io.files.has(".claude/rules/archivist/src-mod.md")).toBe(false);
     expect(io.files.get(PATHS.coreRule)).toContain("Fork: Fork has no timeout");
   });

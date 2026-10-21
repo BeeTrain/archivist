@@ -130,6 +130,22 @@ var jaccard = (a, b) => {
 var slug = (s, max = 48) => normalize(s).replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "") || "entry";
 var truncate = (s, max) => s.length <= max ? s : `${s.slice(0, max - 1)}\u2026`;
 var searchTokens = (s) => tokens(s).flatMap((t) => t.split(/[-./:@+]+/)).filter((t) => t.length > 1).map((t) => t.slice(0, 5));
+var stemSet = (s) => new Set(searchTokens(s));
+var stemSimilarity = (a, b) => {
+  const A = stemSet(a);
+  const B = stemSet(b);
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  return { jaccard: inter / (A.size + B.size - inter || 1), overlap: inter / (Math.min(A.size, B.size) || 1) };
+};
+var coverage = (text, source) => {
+  const A = stemSet(text);
+  const B = stemSet(source);
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  return inter / (A.size || 1);
+};
+var firstCode = (s) => s.match(/`([^`]+)`/)?.[1]?.replace(/\s+/g, " ").trim();
 var bm25 = (docs, query, k1 = 1.2, b = 0.75) => {
   const docTokens = docs.map(searchTokens);
   const avg = docTokens.reduce((s, d) => s + d.length, 0) / Math.max(docTokens.length, 1);
@@ -409,13 +425,34 @@ var weightedTokens = (u) => u.input + u.output + u.cacheWrite + Math.round(u.cac
 // src/core/validate.ts
 var PROCEDURE_CHARS = 1500;
 var DUP_ENTRY = 0.6;
+var PARAPHRASE = { jaccard: 0.35, overlap: 0.55 };
 var DUP_DOC = 0.6;
+var DOC_COVERAGE = 0.6;
+var family = (t) => t === "command" || t === "gotcha" ? "fact" : t;
+var findDuplicate = (entries, type, title, content) => {
+  const text = `${title} ${content}`;
+  let best;
+  for (const e of entries) {
+    if (e.status !== "active" || family(e.type) !== family(type)) continue;
+    const other = `${e.title} ${e.content}`;
+    if (e.type === type && jaccard(other, text) >= DUP_ENTRY) return e;
+    if (e.type === "command" && type === "command" && firstCode(e.content) && firstCode(content) && firstCode(e.content) !== firstCode(content)) continue;
+    const s = stemSimilarity(other, text);
+    if (s.jaccard >= PARAPHRASE.jaccard && s.overlap >= PARAPHRASE.overlap && (!best || s.jaccard > best.score)) best = { e, score: s.jaccard };
+  }
+  return best?.e;
+};
+var docWindows = (docs) => {
+  const lines = docs.flatMap((d) => d.split("\n")).map((l) => l.trim()).filter((l) => l.length > 20);
+  return lines.map((_, i) => lines.slice(i, i + 3).join(" "));
+};
 var clamp01 = (n) => typeof n === "number" && Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
 var docParagraphs = (docs) => docs.flatMap((d) => d.split(/\n\s*\n|\n(?=[-*] )/)).map((p) => p.trim()).filter((p) => p.length > 20);
 var validateOps = async (args) => {
   const { ops, entries, io, config, now, src } = args;
   const out = { records: [], applied: [], proposals: [], rejected: [], firstSightings: [] };
   const paragraphs = docParagraphs(args.docs);
+  const windows = docWindows(args.docs);
   const taken = new Set(entries.keys());
   let adr = nextAdr(entries.values());
   const touched = /* @__PURE__ */ new Set();
@@ -463,9 +500,7 @@ var validateOps = async (args) => {
         confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
         notes.push("seen in an earlier task too");
       }
-      const dup = [...entries.values()].find(
-        (e) => e.status === "active" && e.type === op.type && jaccard(`${e.title} ${e.content}`, `${title} ${content}`) >= DUP_ENTRY
-      );
+      const dup = findDuplicate(entries.values(), op.type, title, content);
       if (dup) {
         if (!touched.has(dup.id)) {
           touched.add(dup.id);
@@ -474,7 +509,11 @@ var validateOps = async (args) => {
         }
         continue;
       }
-      if (paragraphs.some((p) => jaccard(p, `${title} ${content}`) >= DUP_DOC)) {
+      const fact = `${title} ${content}`;
+      const tiny = new Set(fact.match(/\S+/g) ?? []).size < 4;
+      const codes = op.type === "command" ? [...content.matchAll(/`([^`]+)`/g)].map((m) => m[1].replace(/\s+/g, " ").trim()).filter((c2) => c2.length >= 3) : [];
+      const codeInDocs = codes.some((c2) => c2.includes(" ")) && codes.every((c2) => args.docs.some((d) => d.includes(c2)));
+      if (codeInDocs || paragraphs.some((p) => jaccard(p, fact) >= DUP_DOC) || !tiny && windows.some((w) => coverage(fact, w) >= DOC_COVERAGE)) {
         out.rejected.push({ op, reason: "already in project docs" });
         continue;
       }
@@ -646,7 +685,7 @@ var editEntry = async (io, config, id, edit, now) => {
   await appendLedger(io, [{ v: 1, ts: now, op: "update", id, patch }]);
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
-  return { ok: true, entry: after.entries.get(id), written: [...r.written, ...r.removed] };
+  return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
 };
 var deprecateEntry = async (io, config, id, reason, now) => {
   const e = await activeEntry(io, id);
@@ -655,7 +694,7 @@ var deprecateEntry = async (io, config, id, reason, now) => {
   await appendLedger(io, [{ v: 1, ts: now, op: "deprecate", id, reason: redact(reason.trim()).text }]);
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
-  return { ok: true, entry: after.entries.get(id), written: [...r.written, ...r.removed] };
+  return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
 };
 
 // src/core/metrics.ts
@@ -911,6 +950,7 @@ var CURATE_SYSTEM = [
   "- Keep only facts the agent cannot derive quickly from the code: exact commands, non-obvious pitfalls, decisions with their reasons.",
   "- Never write overviews, directory structure, generic best practices, or anything already in the existing project docs.",
   "- Never record one-off operations the task already finished (creating a repo, setting up credentials, rewriting a commit): only what a future task will need again.",
+  '- Never record temporary state or to-dos ("revert X after the test", "not run yet", "until phase 4"): only facts that stay true.',
   "- One atomic fact per entry: two facts are two entries, never one with a joint title.",
   "- title: \u2264 8 words naming the fact. content: 1\u20132 lines, imperative, concrete (exact command, path, flag); it must not repeat the title.",
   "- Prefer reinforcing or updating an existing entry over adding a near-duplicate.",

@@ -38,6 +38,7 @@ export const CURATE_SYSTEM = [
   "- Keep only facts the agent cannot derive quickly from the code: exact commands, non-obvious pitfalls, decisions with their reasons.",
   "- Never write overviews, directory structure, generic best practices, or anything already in the existing project docs.",
   "- Never record one-off operations the task already finished (creating a repo, setting up credentials, rewriting a commit): only what a future task will need again.",
+  "- Never record temporary state or to-dos (\"revert X after the test\", \"not run yet\", \"until phase 4\"): only facts that stay true.",
   "- One atomic fact per entry: two facts are two entries, never one with a joint title.",
   "- title: ≤ 8 words naming the fact. content: 1–2 lines, imperative, concrete (exact command, path, flag); it must not repeat the title.",
   "- Prefer reinforcing or updating an existing entry over adding a near-duplicate.",

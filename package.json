@@ -1,6 +1,6 @@
 {
   "name": "archivist",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Captures project knowledge from coding-agent sessions and turns it into docs that save time, tokens and context next time",
   "private": true,
   "type": "module",

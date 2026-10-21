@@ -37,6 +37,29 @@ export const searchTokens = (s: string): string[] =>
     .filter((t) => t.length > 1)
     .map((t) => t.slice(0, 5));
 
+const stemSet = (s: string): Set<string> => new Set(searchTokens(s));
+
+/** Similarity over word stems, so a paraphrase of the same fact still counts: Jaccard, and overlap over the smaller set. */
+export const stemSimilarity = (a: string, b: string): { jaccard: number; overlap: number } => {
+  const A = stemSet(a);
+  const B = stemSet(b);
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  return { jaccard: inter / (A.size + B.size - inter || 1), overlap: inter / (Math.min(A.size, B.size) || 1) };
+};
+
+/** How much of `text` (its stems) `source` contains: 1 when every stem of the text is in the source. */
+export const coverage = (text: string, source: string): number => {
+  const A = stemSet(text);
+  const B = stemSet(source);
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  return inter / (A.size || 1);
+};
+
+/** The first code span of a text, normalized: what a command entry actually tells to run. */
+export const firstCode = (s: string): string | undefined => s.match(/`([^`]+)`/)?.[1]?.replace(/\s+/g, " ").trim();
+
 /** Scores docs against a query; returns indexes sorted by score, best first, zero scores dropped. */
 export const bm25 = (docs: string[], query: string, k1 = 1.2, b = 0.75): { index: number; score: number }[] => {
   const docTokens = docs.map(searchTokens);
