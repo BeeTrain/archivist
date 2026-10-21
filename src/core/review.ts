@@ -3,6 +3,7 @@ import type { Config } from "./config.js";
 import { PATHS, joinPath, type Io } from "./io.js";
 import { commaList } from "./args.js";
 import { appendLedger, loadState } from "./ledger.js";
+import { loadMetrics } from "./metrics.js";
 import { redact } from "./privacy.js";
 import { truncate } from "./text.js";
 import { renderAll } from "./render.js";
@@ -10,8 +11,12 @@ import { ENTRY_TYPES, type Entry, type EntryPatch, type EntryType, type Proposed
 import { validateOps, type Outcome } from "./validate.js";
 
 export interface Proposal {
-  /** 1-based, in the order `review` lists them. */
+  /** 1-based, in the order `review` lists them; shifts as proposals are applied or skipped. */
   n: number;
+  /** Stable: the file name without `.json`. Use it when acting on several proposals one by one. */
+  id: string;
+  /** When it was proposed. */
+  ts: string;
   path: string;
   op: ProposedOp;
   reason: string | null;
@@ -26,8 +31,8 @@ export const listProposals = async (io: Io): Promise<Proposal[]> => {
   for (const name of names) {
     const path = joinPath(PATHS.proposals, name);
     try {
-      const p = JSON.parse((await io.read(path)) ?? "") as { op: ProposedOp; reason?: string | null; src?: RecordSource };
-      out.push({ n: out.length + 1, path, op: p.op, reason: p.reason ?? null, ...(p.src ? { src: p.src } : {}) });
+      const p = JSON.parse((await io.read(path)) ?? "") as { ts?: string; op: ProposedOp; reason?: string | null; src?: RecordSource };
+      out.push({ n: out.length + 1, id: name.replace(/\.json$/, ""), ts: p.ts ?? "", path, op: p.op, reason: p.reason ?? null, ...(p.src ? { src: p.src } : {}) });
     } catch {
       /* unreadable file: doctor reports it */
     }
@@ -49,16 +54,26 @@ export const reviewText = (proposals: Proposal[]): string =>
         ...proposals.map((p) => `${p.n}. ${describeOp(p.op)}${p.reason ? `  — ${p.reason}` : ""}`),
         "",
         "apply <n|all> records a proposal as is; skip <n|all> drops it and keeps the idea from coming back.",
+        "Or let the agent do it: /archivist:triage checks the technical ones in the code and asks you only about decisions and removals.",
+        "Unreviewed proposals expire on their own; a fact that matters comes up again and a repeat records it.",
         `To edit before applying, change the op in its file under ${PATHS.proposals}/ and apply it.`,
       ].join("\n")
     : "No proposals waiting for review.";
 
 /** Picks proposals by `n`, a list `1,3` or `all`. */
+/** Picks proposals by number (`2`, `1,3`), by stable id, or `all`. */
 export const pick = (proposals: Proposal[], which: string): Proposal[] => {
   if (which.trim() === "all") return proposals;
-  const ns = new Set(which.split(/[\s,]+/).map(Number).filter((n) => Number.isInteger(n)));
-  return proposals.filter((p) => ns.has(p.n));
+  const keys = new Set(which.split(/[\s,]+/).filter(Boolean));
+  return proposals.filter((p) => keys.has(String(p.n)) || keys.has(p.id));
 };
+
+/** Who should decide: a decision or a removal is the user's call; a technical fact the agent can check in the code. */
+export const needsHuman = (op: ProposedOp): boolean => op.op === "deprecate" || (op.op === "add" && op.type === "decision");
+
+/** The queue as data, for the triage skill. */
+export const reviewJson = (proposals: Proposal[]): string =>
+  JSON.stringify(proposals.map((p) => ({ id: p.id, n: p.n, ts: p.ts, human: needsHuman(p.op), reason: p.reason, op: p.op })), null, 1);
 
 /** The user's word is the confidence: what they approve or write is applied, past the auto thresholds. */
 const asUser = (config: Config): Config => ({ ...config, apply: { autoConfidence: 0, autoTypes: [...ENTRY_TYPES] } });
@@ -175,4 +190,22 @@ export const deprecateEntry = async (io: Io, config: Config, id: string, reason:
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
   return { ok: true, entry: after.entries.get(id)!, written: r.written, removed: r.removed };
+};
+
+/**
+ * Drops proposals nobody reviewed within `expireDays` or `expireTasks` analysed tasks. They are not remembered as
+ * skipped: a fact that matters comes up again, and a repeat applies it (promoteOnRepeat). So an ignored queue is safe.
+ */
+export const expireProposals = async (io: Io, config: Config, now: Date): Promise<Proposal[]> => {
+  const tasks = (await loadMetrics(io)).filter((m) => m.source === "live").map((m) => m.ts);
+  const gone: Proposal[] = [];
+  for (const p of await listProposals(io)) {
+    if (!p.ts) continue;
+    const days = (now.getTime() - Date.parse(p.ts)) / 86_400_000;
+    const later = tasks.filter((t) => t > p.ts).length;
+    if (days < config.review.expireDays && later < config.review.expireTasks) continue;
+    await io.remove?.(p.path);
+    gone.push(p);
+  }
+  return gone;
 };

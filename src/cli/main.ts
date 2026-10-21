@@ -6,7 +6,7 @@ import { PATHS, type Io } from "../core/io.js";
 import { activeEntries, appendLedger, loadState } from "../core/ledger.js";
 import { findStale, renderAll } from "../core/render.js";
 import { commaList, parseOptions } from "../core/args.js";
-import { addEntry, applyProposals, deprecateEntry, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from "../core/review.js";
+import { addEntry, applyProposals, deprecateEntry, editEntry, editFromOptions, listProposals, pick, reviewJson, reviewText, skipProposals } from "../core/review.js";
 import { ENTRY_TYPES, type EntryType } from "../core/types.js";
 import { validateOps, type Outcome } from "../core/validate.js";
 import { computeSignals } from "../analyzer/signals.js";
@@ -23,9 +23,9 @@ Usage: archivist <command> [--root <dir>]
   init                  set up .archivist/ and seed exact build/test/lint commands from the project's manifests
   status                what is recorded: entries by type, proposals waiting for review
   report [file]         print the latest task report, or the given one
-  review                list the proposals waiting for review
-  apply <n|1,3|all>     record proposals as they are
-  skip <n|1,3|all>      drop proposals; the same idea is not proposed again
+  review [--json]       list the proposals waiting for review (--json: with stable ids, for the triage skill)
+  apply <n|id|1,3|all>  record proposals as they are
+  skip <n|id|1,3|all>   drop proposals; the same idea is not proposed again
   add --type <command|gotcha|decision|procedure> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
                         record a fact by hand (decisions need --why)
   edit <id> [--title <t>] [--content <c>] [--why <reason>] [--paths <glob,glob>|--paths ""]
@@ -256,7 +256,7 @@ const main = async (): Promise<number> => {
       await report(io, rest[0]);
       return 0;
     case "review":
-      console.log(reviewText(await listProposals(io)));
+      console.log(rest.includes("--json") ? reviewJson(await listProposals(io)) : reviewText(await listProposals(io)));
       return 0;
     case "apply":
     case "skip":

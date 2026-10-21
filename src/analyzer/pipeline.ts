@@ -6,7 +6,7 @@ import { redact } from "../core/privacy.js";
 import { groupAreas, renderAll } from "../core/render.js";
 import { appendMetrics, toMetrics } from "../core/metrics.js";
 import { commandsUsed, loadUsage, recordUse, saveUsage } from "../core/usage.js";
-import { listProposals, loadSkipped } from "../core/review.js";
+import { expireProposals, listProposals, loadSkipped } from "../core/review.js";
 import { bm25, globToRegExp, truncate } from "../core/text.js";
 import { addUsage, emptyUsage, type Entry, type Message, type ProposedOp, type RecordSource, type Segment, type Usage } from "../core/types.js";
 import { validateOps } from "../core/validate.js";
@@ -71,6 +71,7 @@ export const analyzeSegment = async (args: {
   let usage = emptyUsage();
   // Every task is measured, trivial ones too: the metrics are what tells whether the knowledge pays off.
   await appendMetrics(io, toMetrics(signals, ts, "live"));
+  const expired = await expireProposals(io, config, now);
 
   const state = await loadState(io);
   const active = activeEntries(state.entries);
@@ -96,7 +97,10 @@ export const analyzeSegment = async (args: {
   let reflectUsage: Usage | undefined;
   let error: string | undefined;
   const tooBig = (args.contextTokens ?? 0) > config.analyzer.forkMaxContextTokens;
-  const note = tooBig ? `reflect skipped: context ${args.contextTokens} tokens > ${config.analyzer.forkMaxContextTokens}` : undefined;
+  const note =
+    [tooBig ? `reflect skipped: context ${args.contextTokens} tokens > ${config.analyzer.forkMaxContextTokens}` : "", expired.length ? `${expired.length} unreviewed proposals expired` : ""]
+      .filter(Boolean)
+      .join("; ") || undefined;
   if (config.analyzer.reflect === "fork" && llm.reflect && args.messages && !tooBig) {
     const r = await llm.reflect(reflectPrompt(seg.prompts[0], config.language, inPlay));
     reflectUsage = toUsage(r.usage);
@@ -130,7 +134,10 @@ export const analyzeSegment = async (args: {
     src,
     skipped: await loadSkipped(io),
     procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => (JSON.parse(l) as { text: string }).text),
+    pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op })),
   });
+  // A repeat applied these: their proposals are settled.
+  for (const p of (await listProposals(io)).filter((p) => v.promoted.includes(p.id))) await io.remove?.(p.path);
   await appendLedger(io, v.records);
   if (v.firstSightings.length)
     await io.write(CANDIDATES, ((await io.read(CANDIDATES)) ?? "") + v.firstSightings.map((text) => JSON.stringify({ ts, text })).join("\n") + "\n");

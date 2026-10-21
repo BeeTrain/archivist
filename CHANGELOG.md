@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 — 2026-10-22
+
+- `/archivist:triage`: the agent checks technical proposals against the code and settles them, asking the user only about decisions and removals, in plain words.
+- Repeat promotes: a command or gotcha proposed again while its first proposal waits is applied (`review.promoteOnRepeat`). Decisions, procedures and anything with a masked secret still wait for a person.
+- Unreviewed proposals expire after 14 days or 20 analysed tasks (`review.expireDays`, `review.expireTasks`), so an ignored queue stays small.
+- `archivist review --json` and stable proposal ids for `apply`/`skip`.
+
 ## 1.1.2 — 2026-10-22
 
 - Dedupe catches paraphrases: similarity over word stems (thresholds measured on duplicates the analyzer let through), across a command and a gotcha stating the same fact; two commands that run different code stay apart.

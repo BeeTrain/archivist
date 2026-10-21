@@ -42,6 +42,13 @@ export interface Config {
     mode: "quiet" | "rewake";
     toastMs: number;
   };
+  review: {
+    /** A technical fact proposed again in a later task, while the first proposal still waits, is applied: two sightings. */
+    promoteOnRepeat: boolean;
+    /** Unreviewed proposals are dropped after this many days or analysed tasks, whichever comes first. */
+    expireDays: number;
+    expireTasks: number;
+  };
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -60,6 +67,7 @@ export const DEFAULT_CONFIG: Config = {
   budgets: { coreLines: 60, pathFileLines: 40, maxContentChars: 400 },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15_000 },
+  review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 },
 };
 
 type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] };

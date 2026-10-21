@@ -21,6 +21,8 @@ export interface Validated {
   rejected: Outcome[];
   /** Procedures seen for the first time: the caller remembers them for the next sighting. */
   firstSightings: string[];
+  /** Ids of waiting proposals a repeat sighting just applied: the caller removes their files. */
+  promoted: string[];
 }
 
 /** A workflow is longer than a fact: a few numbered steps. */
@@ -58,6 +60,13 @@ const findDuplicate = (entries: Iterable<Entry>, type: EntryType, title: string,
   return best?.e;
 };
 
+/** The same fact, in the same words or in other words. */
+const sameFact = (a: string, b: string): boolean => {
+  if (jaccard(a, b) >= DUP_ENTRY) return true;
+  const s = stemSimilarity(a, b);
+  return s.jaccard >= PARAPHRASE.jaccard && s.overlap >= PARAPHRASE.overlap;
+};
+
 /** Three-line windows of the docs: a fact is often stated over a table row and the note under it. */
 const docWindows = (docs: string[]): string[] => {
   const lines = docs.flatMap((d) => d.split("\n")).map((l) => l.trim()).filter((l) => l.length > 20);
@@ -83,9 +92,11 @@ export const validateOps = async (args: {
   skipped?: string[];
   /** Procedures seen in earlier tasks but not proposed yet: a workflow becomes a skill only once it repeats. */
   procedureCandidates?: string[];
+  /** Proposals still waiting for review: a repeat of one of them confirms it. */
+  pending?: { id: string; op: ProposedOp }[];
 }): Promise<Validated> => {
   const { ops, entries, io, config, now, src } = args;
-  const out: Validated = { records: [], applied: [], proposals: [], rejected: [], firstSightings: [] };
+  const out: Validated = { records: [], applied: [], proposals: [], rejected: [], firstSightings: [], promoted: [] };
   const paragraphs = docParagraphs(args.docs);
   const windows = docWindows(args.docs);
   const taken = new Set(entries.keys());
@@ -199,8 +210,20 @@ export const validateOps = async (args: {
         ...(op.savings && (op.savings.toolCalls || op.savings.tokens) ? { savings: { toolCalls: Number(op.savings.toolCalls) || 0, tokens: Number(op.savings.tokens) || 0 } } : {}),
         reinforced: 0,
       };
+      // Two independent sightings of a technical fact outweigh one confidence score: a fact proposed again while
+      // its first proposal still waits is applied. Decisions, workflows and anything that needed a secret masked
+      // keep waiting for a person.
+      const earlier =
+        route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted")
+          ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title} ${content}`))
+          : undefined;
+      if (earlier) {
+        entry.confidence = Math.max(entry.confidence, config.apply.autoConfidence);
+        notes.push("proposed again in a later task");
+        out.promoted.push(earlier.id);
+      }
       const o: Outcome = { op, id, type: op.type, title, ...(notes.length ? { reason: notes.join("; ") } : {}) };
-      if (route(entry.confidence, op.type) === "apply") {
+      if (earlier || route(entry.confidence, op.type) === "apply") {
         if (op.type === "decision") adr++;
         out.records.push({ v: 1, ts: now, op: "add", entry, src });
         out.applied.push(o);
