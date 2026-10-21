@@ -51,3 +51,27 @@ export const relPath = (root: string, path: string): string => {
   const r = root.endsWith("/") ? root : `${root}/`;
   return path.startsWith(r) ? path.slice(r.length) : path;
 };
+
+/**
+ * What lands in `.archivist/.local/` quotes the user's prompts and session ids. The mod writes there from the first
+ * analysed task, `archivist init` or not, so every Io that writes guards it: before the first write under
+ * `.archivist/`, `.archivist/.gitignore` is created, or given a `.local/` line if someone's own file lacks one.
+ */
+export const withLocalIgnored = (io: Io): Io => {
+  let checked = false;
+  const guard = async () => {
+    if (checked) return;
+    checked = true;
+    const text = await io.read(PATHS.gitignore);
+    if (text === undefined) await io.write(PATHS.gitignore, ".local/\n");
+    else if (!text.split("\n").some((l) => /^\/?\.local\/?\s*$/.test(l.trim())))
+      await io.write(PATHS.gitignore, `${text}${text.endsWith("\n") || !text ? "" : "\n"}.local/\n`);
+  };
+  return {
+    ...io,
+    async write(path, text) {
+      if (path.startsWith(`${PATHS.dir}/`) && path !== PATHS.gitignore) await guard();
+      await io.write(path, text);
+    },
+  };
+};

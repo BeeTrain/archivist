@@ -18,6 +18,25 @@ var relPath = (root2, path) => {
   const r = root2.endsWith("/") ? root2 : `${root2}/`;
   return path.startsWith(r) ? path.slice(r.length) : path;
 };
+var withLocalIgnored = (io) => {
+  let checked = false;
+  const guard = async () => {
+    if (checked) return;
+    checked = true;
+    const text = await io.read(PATHS.gitignore);
+    if (text === void 0) await io.write(PATHS.gitignore, ".local/\n");
+    else if (!text.split("\n").some((l) => /^\/?\.local\/?\s*$/.test(l.trim())))
+      await io.write(PATHS.gitignore, `${text}${text.endsWith("\n") || !text ? "" : "\n"}.local/
+`);
+  };
+  return {
+    ...io,
+    async write(path, text) {
+      if (path.startsWith(`${PATHS.dir}/`) && path !== PATHS.gitignore) await guard();
+      await io.write(path, text);
+    }
+  };
+};
 
 // src/core/config.ts
 var DEFAULT_CONFIG = {
@@ -881,6 +900,11 @@ var recallText = (entries, query, k2 = 5) => {
   }).join("\n");
 };
 
+// src/core/log.ts
+var LOG_LINES = 100;
+var logKey = (root2) => `archivist:log:${root2}`;
+var withLine = (lines, line, at, max = LOG_LINES) => [...lines ?? [], `${at.toISOString()} ${line}`].slice(-max);
+
 // src/analyzer/digest.ts
 var toolLine = (t) => {
   const i = t.input;
@@ -1262,8 +1286,6 @@ var analyzeSegment = async (args) => {
 var SEG_KEY = "archivist:seg:";
 var BUDGET_KEY = "archivist:budget:";
 var LAST_KEY = "archivist:last:";
-var LOG_KEY = "archivist:log";
-var LOG_LINES = 100;
 var RETRY_MS = 15 * 6e4;
 var FORK_TIMEOUT_MS = 12e4;
 var segKey = (s) => `${SEG_KEY}${s.session}:${s.id}`;
@@ -1304,7 +1326,7 @@ var newSegment = () => ({
 });
 function makeIo($, base) {
   const abs = (p) => joinPath(base, p);
-  return {
+  return withLocalIgnored({
     root: base,
     async read(p) {
       return await $.fs.exists(abs(p)) ? await $.fs.read(abs(p)) : void 0;
@@ -1326,12 +1348,11 @@ function makeIo($, base) {
       const entries = await $.fs.list(abs(dir));
       return entries.map((e) => e.name);
     }
-  };
+  });
 }
-async function log($, line) {
-  const lines = await $.store.get(LOG_KEY) ?? [];
-  lines.push(`${(/* @__PURE__ */ new Date()).toISOString()} ${line}`);
-  await $.store.set(LOG_KEY, lines.slice(-LOG_LINES));
+async function log($, project, line) {
+  const key = logKey(project);
+  await $.store.set(key, withLine(await $.store.get(key), line, /* @__PURE__ */ new Date()));
 }
 function makeLlm($, config) {
   const reply = (r) => r.isAnswered ? { ok: true, text: r.text, usage: toUsage2(r.usage) } : { ok: false, reason: String(r.reason), usage: toUsage2(r.usage) };
@@ -1377,22 +1398,22 @@ async function refreshStatus($, io) {
 async function analyse($, stored, current) {
   const s = stored.seg;
   if (analysing) {
-    await log($, `seg ${s.id}: another analysis is running, retry later`);
+    await log($, stored.root, `seg ${s.id}: another analysis is running, retry later`);
     $.clock.after(RETRY_MS, async () => analyse($, stored, current));
     return;
   }
   analysing = true;
   try {
     if (!await $.store.get(segKey(s))) {
-      await log($, `seg ${s.id}: already analysed, skipped`);
+      await log($, stored.root, `seg ${s.id}: already analysed, skipped`);
       return;
     }
     const io = makeIo($, stored.root);
     const config = await loadConfig(io);
-    await log($, `seg ${s.id}: start (${s.turns.length} turns, ${s.tools.length} tool calls, current=${current})`);
+    await log($, stored.root, `seg ${s.id}: start (${s.turns.length} turns, ${s.tools.length} tool calls, current=${current})`);
     if (!config.enabled) {
       await $.store.delete(segKey(s));
-      await log($, `seg ${s.id}: archivist disabled for this project, dropped`);
+      await log($, stored.root, `seg ${s.id}: archivist disabled for this project, dropped`);
       return;
     }
     const spentKey = BUDGET_KEY + today();
@@ -1401,7 +1422,7 @@ async function analyse($, stored, current) {
     const limits = usage.rateLimits ?? [];
     const held = spent >= config.analyzer.maxTokensPerDay ? `daily budget used (${spent}/${config.analyzer.maxTokensPerDay})` : limits.filter((l) => l.percentUsed >= config.analyzer.maxRateLimitPercent).map((l) => `${l.kind} rate limit at ${l.percentUsed}%`).join(", ");
     if (held) {
-      await log($, `seg ${s.id}: postponed: ${held}`);
+      await log($, stored.root, `seg ${s.id}: postponed: ${held}`);
       showStatus($, `\u{1F4DA} analysis postponed: ${held}`);
       $.clock.after(RETRY_MS, async () => analyse($, stored, current));
       return;
@@ -1419,6 +1440,7 @@ async function analyse($, stored, current) {
     await $.store.set(spentKey, spent + weightedTokens(result.usage));
     await log(
       $,
+      stored.root,
       result.kind === "skipped" ? `seg ${s.id}: skipped: ${result.reason}` : `seg ${s.id}: done: ${result.report.applied.length} applied, ${result.report.proposals.length} proposals, ${result.report.rejected.length} dropped, ${weightedTokens(result.usage)} weighted tokens${result.report.analysis.error ? `; ${result.report.analysis.error}` : ""} \u2192 ${result.reportPath}`
     );
     if (result.kind === "skipped") {
@@ -1440,7 +1462,7 @@ ${notice}`
   } catch (err) {
     const msg = err instanceof Error ? `${err.message}
 ${err.stack ?? ""}` : String(err);
-    await log($, `seg ${s.id}: failed: ${msg}`);
+    await log($, stored.root, `seg ${s.id}: failed: ${msg}`);
     showStatus($, "\u{1F4DA} analysis failed: /archivist log");
   } finally {
     analysing = false;
@@ -1468,7 +1490,7 @@ function register(on) {
       waiting.set(segKey(s.seg), { stored: s, current: s.seg.session === session });
     }
     if (waiting.size) {
-      await log($, `session.start: ${waiting.size} task(s) waiting for analysis`);
+      await log($, root, `session.start: ${waiting.size} task(s) waiting for analysis`);
       const config = await loadConfig(makeIo($, root));
       $.clock.after(config.analyzer.idleSeconds * 1e3, async () => {
         for (const w of waiting.values()) await analyse($, w.stored, w.current);
@@ -1554,8 +1576,8 @@ function register(on) {
     const io = makeIo($, root);
     const [verb = "report", ...rest] = splitArgs(e.args);
     if (verb === "log") {
-      const lines = await $.store.get(LOG_KEY) ?? [];
-      return { text: lines.length ? lines.slice(-30).join("\n") : "Archivist log is empty." };
+      const lines = await $.store.get(logKey(root)) ?? [];
+      return { text: lines.length ? [`Archivist log for ${root}:`, ...lines.slice(-30)].join("\n") : `Archivist log for ${root} is empty.` };
     }
     if (verb === "review") return { text: reviewText(await listProposals(io)) };
     if (verb === "edit" || verb === "deprecate") {

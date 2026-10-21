@@ -8,12 +8,13 @@
 //     so the open task is kept in `$.store` after every turn and picked up again on `session.start`.
 import type { On } from 'claude-code'
 import { DEFAULT_CONFIG, loadConfig, type Config } from '../../../core/config.js'
-import { PATHS, joinPath, relPath, type Io, type Llm, type LlmReply } from '../../../core/io.js'
+import { PATHS, joinPath, relPath, withLocalIgnored, type Io, type Llm, type LlmReply } from '../../../core/io.js'
 import { activeEntries, loadState } from '../../../core/ledger.js'
 import { isExcluded, redact } from '../../../core/privacy.js'
 import { applyProposals, deprecateEntry, describeOp, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
 import { parseOptions, splitArgs } from '../../../core/args.js'
 import { recallText, statsText } from '../../../core/maintenance.js'
+import { logKey, withLine } from '../../../core/log.js'
 import { truncate } from '../../../core/text.js'
 import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
 import { analyzeSegment } from '../../../analyzer/pipeline.js'
@@ -22,8 +23,6 @@ import { noticeText, statusLine } from '../../../analyzer/report.js'
 const SEG_KEY = 'archivist:seg:'
 const BUDGET_KEY = 'archivist:budget:'
 const LAST_KEY = 'archivist:last:'
-const LOG_KEY = 'archivist:log'
-const LOG_LINES = 100
 /** Wait before trying again when a budget or rate limit held the analysis back. */
 const RETRY_MS = 15 * 60_000
 const FORK_TIMEOUT_MS = 120_000
@@ -89,7 +88,7 @@ const newSegment = (): Segment => ({
 
 function makeIo($: any, base: string): Io {
   const abs = (p: string) => joinPath(base, p)
-  return {
+  return withLocalIgnored({
     root: base,
     async read(p) {
       return (await $.fs.exists(abs(p))) ? await $.fs.read(abs(p)) : undefined
@@ -114,14 +113,13 @@ function makeIo($: any, base: string): Io {
       const entries = (await $.fs.list(abs(dir))) as { name: string }[]
       return entries.map((e) => e.name)
     },
-  }
+  })
 }
 
-/** Diagnostics kept in the mod's store (readable with `/archivist log`): the analysis runs where no one watches. */
-async function log($: any, line: string): Promise<void> {
-  const lines = ((await $.store.get(LOG_KEY)) as string[] | undefined) ?? []
-  lines.push(`${new Date().toISOString()} ${line}`)
-  await $.store.set(LOG_KEY, lines.slice(-LOG_LINES))
+/** Diagnostics kept in the mod's store, one log per project (`/archivist log`): the analysis runs where no one watches. */
+async function log($: any, project: string, line: string): Promise<void> {
+  const key = logKey(project)
+  await $.store.set(key, withLine((await $.store.get(key)) as string[] | undefined, line, new Date()))
 }
 
 function makeLlm($: any, config: Config): Llm {
@@ -176,7 +174,7 @@ async function refreshStatus($: any, io: Io): Promise<void> {
 async function analyse($: any, stored: StoredSegment, current: boolean): Promise<void> {
   const s = stored.seg
   if (analysing) {
-    await log($, `seg ${s.id}: another analysis is running, retry later`)
+    await log($, stored.root, `seg ${s.id}: another analysis is running, retry later`)
     $.clock.after(RETRY_MS, async () => analyse($, stored, current))
     return
   }
@@ -184,15 +182,15 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
   try {
     // A retry or a second schedule may reach a task that has been analysed meanwhile: its key is gone then.
     if (!(await $.store.get(segKey(s)))) {
-      await log($, `seg ${s.id}: already analysed, skipped`)
+      await log($, stored.root, `seg ${s.id}: already analysed, skipped`)
       return
     }
     const io = makeIo($, stored.root)
     const config = await loadConfig(io)
-    await log($, `seg ${s.id}: start (${s.turns.length} turns, ${s.tools.length} tool calls, current=${current})`)
+    await log($, stored.root, `seg ${s.id}: start (${s.turns.length} turns, ${s.tools.length} tool calls, current=${current})`)
     if (!config.enabled) {
       await $.store.delete(segKey(s))
-      await log($, `seg ${s.id}: archivist disabled for this project, dropped`)
+      await log($, stored.root, `seg ${s.id}: archivist disabled for this project, dropped`)
       return
     }
 
@@ -208,7 +206,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
             .map((l) => `${l.kind} rate limit at ${l.percentUsed}%`)
             .join(', ')
     if (held) {
-      await log($, `seg ${s.id}: postponed: ${held}`)
+      await log($, stored.root, `seg ${s.id}: postponed: ${held}`)
       showStatus($, `📚 analysis postponed: ${held}`)
       $.clock.after(RETRY_MS, async () => analyse($, stored, current))
       return
@@ -228,6 +226,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
     await $.store.set(spentKey, spent + weightedTokens(result.usage))
     await log(
       $,
+      stored.root,
       result.kind === 'skipped'
         ? `seg ${s.id}: skipped: ${result.reason}`
         : `seg ${s.id}: done: ${result.report.applied.length} applied, ${result.report.proposals.length} proposals, ` +
@@ -251,7 +250,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
     }
   } catch (err) {
     const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
-    await log($, `seg ${s.id}: failed: ${msg}`)
+    await log($, stored.root, `seg ${s.id}: failed: ${msg}`)
     showStatus($, '📚 analysis failed: /archivist log')
   } finally {
     analysing = false
@@ -283,7 +282,7 @@ export function register(on: On): void {
       waiting.set(segKey(s.seg), { stored: s, current: s.seg.session === session })
     }
     if (waiting.size) {
-      await log($, `session.start: ${waiting.size} task(s) waiting for analysis`)
+      await log($, root, `session.start: ${waiting.size} task(s) waiting for analysis`)
       const config = await loadConfig(makeIo($, root))
       $.clock.after(config.analyzer.idleSeconds * 1000, async () => {
         for (const w of waiting.values()) await analyse($, w.stored, w.current)
@@ -377,8 +376,8 @@ export function register(on: On): void {
     const io = makeIo($, root)
     const [verb = 'report', ...rest] = splitArgs(e.args)
     if (verb === 'log') {
-      const lines = ((await $.store.get(LOG_KEY)) as string[] | undefined) ?? []
-      return { text: lines.length ? lines.slice(-30).join('\n') : 'Archivist log is empty.' }
+      const lines = ((await $.store.get(logKey(root))) as string[] | undefined) ?? []
+      return { text: lines.length ? [`Archivist log for ${root}:`, ...lines.slice(-30)].join('\n') : `Archivist log for ${root} is empty.` }
     }
     if (verb === 'review') return { text: reviewText(await listProposals(io)) }
     if (verb === 'edit' || verb === 'deprecate') {

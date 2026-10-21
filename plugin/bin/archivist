@@ -23,6 +23,25 @@ var relPath = (root, path) => {
   const r = root.endsWith("/") ? root : `${root}/`;
   return path.startsWith(r) ? path.slice(r.length) : path;
 };
+var withLocalIgnored = (io) => {
+  let checked = false;
+  const guard = async () => {
+    if (checked) return;
+    checked = true;
+    const text = await io.read(PATHS.gitignore);
+    if (text === void 0) await io.write(PATHS.gitignore, ".local/\n");
+    else if (!text.split("\n").some((l) => /^\/?\.local\/?\s*$/.test(l.trim())))
+      await io.write(PATHS.gitignore, `${text}${text.endsWith("\n") || !text ? "" : "\n"}.local/
+`);
+  };
+  return {
+    ...io,
+    async write(path, text) {
+      if (path.startsWith(`${PATHS.dir}/`) && path !== PATHS.gitignore) await guard();
+      await io.write(path, text);
+    }
+  };
+};
 
 // src/core/config.ts
 var DEFAULT_CONFIG = {
@@ -1019,7 +1038,8 @@ var lint = async (io, entries, config) => {
 import { existsSync } from "node:fs";
 import { mkdir, readdir as readdir2, readFile as readFile2, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join as join2, resolve } from "node:path";
-var nodeIo = (root) => ({
+var nodeIo = (root) => withLocalIgnored(rawNodeIo(root));
+var rawNodeIo = (root) => ({
   root,
   async read(p) {
     try {

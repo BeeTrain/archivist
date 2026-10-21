@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.2 — 2026-10-22
+
+- Fix: in a project where `archivist init` never ran, `.archivist/.local/` (reports quoting prompts and session ids) was not git-ignored. Every writer now creates `.archivist/.gitignore`, or adds a `.local/` line to an existing one, before its first write under `.archivist/`.
+- The mod keeps one diagnostic log per project; `/archivist log` shows the current project's.
+
 ## 1.2.1 — 2026-10-22
 
 - Fix: a skill directory emptied by a rename or removal is removed too, including one left by an earlier version; a directory holding a file someone added stays.

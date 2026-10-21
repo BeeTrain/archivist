@@ -1,9 +1,11 @@
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { PATHS, type Io } from "../core/io.js";
+import { PATHS, withLocalIgnored, type Io } from "../core/io.js";
 
-export const nodeIo = (root: string): Io => ({
+export const nodeIo = (root: string): Io => withLocalIgnored(rawNodeIo(root));
+
+const rawNodeIo = (root: string): Io => ({
   root,
   async read(p) {
     try {
