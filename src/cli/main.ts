@@ -231,9 +231,13 @@ const doctor = async (io: Io): Promise<boolean> => {
   const config = await loadConfig(io);
   for (const name of (await io.list(PATHS.rulesDir)).filter((n) => n.endsWith(".md"))) {
     const path = `${PATHS.rulesDir}/${name}`;
-    const lines = ((await io.read(path)) ?? "").split("\n").length - 1;
-    const budget = path === PATHS.coreRule ? config.budgets.coreLines : config.budgets.pathFileLines + 6;
-    check(lines <= budget, `${path}: ${lines}/${budget} lines`, "run `archivist render`");
+    const text = (await io.read(path)) ?? "";
+    const lines = text.split("\n").length - 1;
+    const core = path === PATHS.coreRule;
+    // A path-scoped file carries its frontmatter on top of the budget.
+    const budget = core ? config.budgets.coreLines : config.budgets.pathFileLines + 6;
+    const chars = core ? config.budgets.coreChars : config.budgets.pathFileChars + 400;
+    check(lines <= budget && text.length <= chars, `${path}: ${lines}/${budget} lines, ${text.length}/${chars} chars`, "run `archivist render`");
   }
   const stale = await findStale(io, state.entries);
   check(!stale.size, `${stale.size} stale entries (cited files are gone)`, `review them in ${PATHS.index}: update or deprecate`);

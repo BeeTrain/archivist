@@ -119,7 +119,7 @@ describe("render", () => {
     const adr = [...views.keys()].find((k) => k.startsWith(PATHS.decisions));
     expect(adr).toBe(".archivist/decisions/ADR-0007-stream-csv.md");
     expect(views.get(adr!)).toContain("## Context\n\n1 GB files");
-    expect(views.get(PATHS.coreRule)).toContain("ADR-0007 Stream CSV");
+    expect(views.get(PATHS.coreRule)).toContain("ADR-0007 **Stream CSV**: Stream exports");
     const io = memoryIo();
     expect(await writeViews(io, views)).toHaveLength(3);
     expect(await writeViews(io, views)).toHaveLength(0);

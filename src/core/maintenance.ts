@@ -125,7 +125,9 @@ export const healthText = async (io: Io, entries: Map<string, Entry>, config: Co
   const stale = await findStale(io, entries);
   const queue = await listProposals(io);
   const human = queue.filter((p) => needsHuman(p.op)).length;
-  const coreLines = Math.max(0, ((await io.read(PATHS.coreRule)) ?? "").split("\n").length - 1);
+  const coreText = (await io.read(PATHS.coreRule)) ?? "";
+  const coreLines = Math.max(0, coreText.split("\n").length - 1);
+  const coreChars = coreText.length;
   const areas = groupAreas(active, stale).size;
 
   const week = (await loadAnalyses(io)).filter((a) => a.ts >= since);
@@ -152,7 +154,7 @@ export const healthText = async (io: Io, entries: Map<string, Entry>, config: Co
     "",
     "## Knowledge",
     `- ${active.length} active entries: ${by("command")} commands, ${by("gotcha")} gotchas, ${by("decision")} decisions, ${by("procedure")} procedures; ${entries.size - active.length} retired; ${stale.size} stale`,
-    `- always loaded: ${PATHS.coreRule} ${coreLines}/${config.budgets.coreLines} lines; ${areas} path-scoped rule files`,
+    `- always loaded: ${PATHS.coreRule} ${coreLines}/${config.budgets.coreLines} lines, ${coreChars}/${config.budgets.coreChars} chars (≈ ${Math.round(coreChars / 3)} tokens every session); ${areas} path-scoped rule files`,
     `- review queue: ${queue.length}${human ? ` (${human} decisions or removals wait for you)` : ""}`,
     "",
     "## Last 7 days",
@@ -175,7 +177,7 @@ export const healthText = async (io: Io, entries: Map<string, Entry>, config: Co
   if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
   if (neverMet.length >= 3) todo.push(`${neverMet.length} entries never met in a week: archivist gc --days 7 lists them, --apply retires them`);
   if (warnings.some((w) => !w.text.includes("stale") && !w.text.includes("judged wrong"))) todo.push("lint findings above: merge or fix them with /archivist edit or /archivist deprecate");
-  if (coreLines > config.budgets.coreLines * 0.9) todo.push(`${PATHS.coreRule} is near its budget: scope entries to paths (/archivist edit <id> --paths "…")`);
+  if (coreLines > config.budgets.coreLines * 0.9 || coreChars > config.budgets.coreChars * 0.9) todo.push(`${PATHS.coreRule} is near its budget: scope entries to paths (/archivist edit <id> --paths "…")`);
   // Judged only on a week the journal covers: before 1.3.0 there is no journal, and silence would read as failure.
   if (week.length >= 5 && !done.some((a) => a.applied || a.proposals)) todo.push("nothing recorded in a week of tasks: the thresholds may be too strict (analyzer.minToolCalls, apply.autoConfidence)");
   if (!(await loadBaseline(io))) todo.push("no baseline yet: archivist baseline, so /archivist stats can show the effect");

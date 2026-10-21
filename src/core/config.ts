@@ -30,9 +30,19 @@ export interface Config {
   budgets: {
     /** Lines in the always-loaded .claude/rules/archivist/core.md. */
     coreLines: number;
+    /** Characters in core.md: what it really costs every session (~6000 chars is about 2k tokens). */
+    coreChars: number;
     /** Lines in each path-scoped rule file, loaded only when the agent touches matching files. */
     pathFileLines: number;
+    pathFileChars: number;
     maxContentChars: number;
+  };
+  rules: {
+    /**
+     * Decisions in the always-loaded rule: "compact" writes the title and first sentence (the full text stays in the
+     * ADR and in path-scoped files); "full" writes the whole decision, as before 1.3.1.
+     */
+    decisions: "compact" | "full";
   };
   privacy: {
     /** Files that never reach the journal, a model or an entry's evidence. */
@@ -64,7 +74,8 @@ export const DEFAULT_CONFIG: Config = {
     maxRateLimitPercent: 90,
   },
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
-  budgets: { coreLines: 60, pathFileLines: 40, maxContentChars: 400 },
+  budgets: { coreLines: 60, coreChars: 6000, pathFileLines: 40, pathFileChars: 3000, maxContentChars: 400 },
+  rules: { decisions: "compact" },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15_000 },
   review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 },

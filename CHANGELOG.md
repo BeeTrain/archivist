@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1 — 2026-10-22
+
+- core.md gets a character budget (`budgets.coreChars`, 6000 ≈ 2k tokens) besides its line budget, and path-scoped files one too (`budgets.pathFileChars`, 3000). Lines alone let long entries grow core.md to ~10k characters.
+- What fits is chosen by merit (used, seen, helpful; misleading last), then commands, gotchas, decisions; it is written in a stable order. The rest stays in INDEX.md and `recall`.
+- Decisions scoped to paths go, in full, to that area's rule file instead of core.md. In core.md a decision is its title and first sentence (`rules.decisions: "full"` restores the whole text).
+- The curator is asked to scope decisions to paths and to open each with the rule in one sentence.
+- `health` and `doctor` report characters against the budgets. On this project core.md went from 10,062 to 4,163 characters with every entry still in a rule file.
+
 ## 1.3.0 — 2026-10-22
 
 - `/archivist health` and `archivist health`: one look at how Archivist is doing in a project — the knowledge base, the last week of analyses (done, skipped, failed, postponed, cost), entries no task met, entries judged wrong, lint findings — ending in what to do, or that nothing needs doing.
