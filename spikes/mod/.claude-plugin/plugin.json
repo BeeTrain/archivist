@@ -1,0 +1,1 @@
+{ "name": "archivist-spike", "version": "0.1.0", "description": "Spike: probes mods API for archivist (turn.complete line, model.complete/fork, session.messages/usage, toast/status, classic hooks)" }

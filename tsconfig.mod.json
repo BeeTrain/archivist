@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": [
+      "ES2023"
+    ],
+    "types": []
+  },
+  "include": [
+    "types/claude-code/index.d.ts",
+    "src/core",
+    "src/analyzer",
+    "src/adapters/claude/mod"
+  ],
+  "exclude": []
+}

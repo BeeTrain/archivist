@@ -1,0 +1,10 @@
+{
+  "modules": ["./register.ts"],
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/opt/homebrew/bin/node \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-probe.mjs\" ups" }] }],
+    "Stop": [{ "hooks": [
+      { "type": "command", "command": "/opt/homebrew/bin/node \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-probe.mjs\" sync" },
+      { "type": "command", "async": true, "asyncRewake": true, "command": "/opt/homebrew/bin/node \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-probe.mjs\" rewake" }
+    ] }]
+  }
+}

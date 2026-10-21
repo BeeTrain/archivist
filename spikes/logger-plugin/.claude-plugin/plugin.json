@@ -1,0 +1,4 @@
+{
+  "name": "archivist-spike-logger",
+  "description": "Spike: logs every hook payload to $ARCH_SPIKE_LOG (JSONL)"
+}

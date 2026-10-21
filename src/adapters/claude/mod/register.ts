@@ -1,0 +1,373 @@
+// Archivist for Claude Code, as a mod: journals each task, analyses it once the session goes quiet,
+// writes the knowledge back into the project and reports what it learned.
+//
+// Bundled by scripts/build.mjs into plugin/hooks/register.js. Rules of the mods runtime that shape this file:
+//   - no Node: every outside effect goes through `$`;
+//   - `$` may only be passed to functions declared at the top level of this file;
+//   - work that must outlive a hook's dispatch runs on `$.clock.after`; a module reload drops timers,
+//     so the open task is kept in `$.store` after every turn and picked up again on `session.start`.
+import type { On } from 'claude-code'
+import { loadConfig, type Config } from '../../../core/config.js'
+import { PATHS, joinPath, relPath, type Io, type Llm, type LlmReply } from '../../../core/io.js'
+import { activeEntries, loadState } from '../../../core/ledger.js'
+import { truncate } from '../../../core/text.js'
+import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
+import { analyzeSegment } from '../../../analyzer/pipeline.js'
+import { noticeText, statusLine } from '../../../analyzer/report.js'
+
+const SEG_KEY = 'archivist:seg:'
+const BUDGET_KEY = 'archivist:budget:'
+const LAST_KEY = 'archivist:last:'
+const LOG_KEY = 'archivist:log'
+const LOG_LINES = 100
+/** Wait before trying again when a budget or rate limit held the analysis back. */
+const RETRY_MS = 15 * 60_000
+const FORK_TIMEOUT_MS = 120_000
+
+interface StoredSegment {
+  root: string
+  seg: Segment
+}
+
+/** One store key per task, so a task waiting for analysis is never overwritten by the next one. */
+const segKey = (s: Segment): string => `${SEG_KEY}${s.session}:${s.id}`
+
+interface ModUsage {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+}
+
+const toUsage = (u: ModUsage | undefined): Usage => ({
+  input: u?.input_tokens ?? 0,
+  output: u?.output_tokens ?? 0,
+  cacheRead: u?.cache_read_input_tokens ?? 0,
+  cacheWrite: u?.cache_creation_input_tokens ?? 0,
+})
+
+const today = (): string => new Date().toISOString().slice(0, 10)
+
+/** What the journal keeps of a tool call: its target, never its content. */
+const toolTarget = (root: string, tool: string, input: unknown): string | undefined => {
+  const i = (input ?? {}) as Record<string, unknown>
+  const v = i.file_path ?? i.notebook_path ?? i.command ?? i.pattern ?? i.path ?? i.url
+  if (typeof v !== 'string') return undefined
+  return tool === 'Bash' ? truncate(v.replace(/\s+/g, ' ').trim(), 200) : relPath(root, v)
+}
+
+// ── state of this module copy (reset on reload; the open segment is restored from $.store) ──
+let root = ''
+let session = ''
+let seg: Segment | undefined
+let idle: { cancel: () => void } | undefined
+let analysing = false
+let notice: string | undefined
+let ownTurnPending = false
+const ownTurns = new Set<string>()
+
+const newSegment = (): Segment => ({
+  id: Date.now().toString(36),
+  session,
+  startedAt: Date.now(),
+  prompts: [],
+  answers: [],
+  turns: [],
+  tools: [],
+  rulesLoaded: [],
+})
+
+function makeIo($: any, base: string): Io {
+  const abs = (p: string) => joinPath(base, p)
+  return {
+    root: base,
+    async read(p) {
+      return (await $.fs.exists(abs(p))) ? await $.fs.read(abs(p)) : undefined
+    },
+    async write(p, text) {
+      try {
+        await $.fs.write(abs(p), text)
+      } catch {
+        await $.process.run(['mkdir', '-p', abs(p).replace(/\/[^/]*$/, '')])
+        await $.fs.write(abs(p), text)
+      }
+    },
+    async exists(p) {
+      return await $.fs.exists(abs(p))
+    },
+    async list(dir) {
+      if (!(await $.fs.exists(abs(dir)))) return []
+      const entries = (await $.fs.list(abs(dir))) as { name: string }[]
+      return entries.map((e) => e.name)
+    },
+  }
+}
+
+/** Diagnostics kept in the mod's store (readable with `/archivist log`): the analysis runs where no one watches. */
+async function log($: any, line: string): Promise<void> {
+  const lines = ((await $.store.get(LOG_KEY)) as string[] | undefined) ?? []
+  lines.push(`${new Date().toISOString()} ${line}`)
+  await $.store.set(LOG_KEY, lines.slice(-LOG_LINES))
+}
+
+function makeLlm($: any, config: Config): Llm {
+  const reply = (r: any): LlmReply =>
+    r.isAnswered ? { ok: true, text: r.text, usage: toUsage(r.usage) } : { ok: false, reason: String(r.reason), usage: toUsage(r.usage) }
+  return {
+    async reflect(prompt) {
+      // fork takes no time limit of its own; a hung call would hold the analysis lock forever.
+      const timeout = $.clock.sleep(FORK_TIMEOUT_MS).then(() => ({ isAnswered: false, reason: 'timeout' }))
+      return reply(await Promise.race([$.model.fork({ prompt }), timeout]))
+    },
+    async complete({ system, prompt, maxTokens }) {
+      return reply(
+        await $.model.complete({
+          model: config.analyzer.curateModel,
+          system: [{ text: system, cache: true }],
+          prompt,
+          maxTokens,
+          timeoutMs: 120_000,
+        }),
+      )
+    },
+  }
+}
+
+async function saveSegment($: any): Promise<void> {
+  if (seg) await $.store.set(segKey(seg), { root, seg } satisfies StoredSegment)
+}
+
+async function readMessages($: any): Promise<Message[]> {
+  const list = (await $.session.messages()) as any[]
+  return list.map((m) => ({
+    role: m.role,
+    text: m.text ?? '',
+    toolUses: (m.toolUses ?? []).map((t: any) => ({ tool: t.tool, input: t.input ?? {}, isError: t.isError, text: t.text })),
+  }))
+}
+
+async function refreshStatus($: any, io: Io): Promise<void> {
+  const state = await loadState(io)
+  const n = activeEntries(state.entries).length
+  const queued = (await io.list(PATHS.proposals)).length
+  $.ui.status(n || queued ? `📚 ${n} entries${queued ? ` · ${queued} to review` : ''}` : undefined)
+}
+
+/** Runs the pipeline over one finished task. `current` = it belongs to this live session (messages and fork available). */
+async function analyse($: any, stored: StoredSegment, current: boolean): Promise<void> {
+  const s = stored.seg
+  if (analysing) {
+    await log($, `seg ${s.id}: another analysis is running, retry later`)
+    $.clock.after(RETRY_MS, async () => analyse($, stored, current))
+    return
+  }
+  analysing = true
+  try {
+    // A retry or a second schedule may reach a task that has been analysed meanwhile: its key is gone then.
+    if (!(await $.store.get(segKey(s)))) {
+      await log($, `seg ${s.id}: already analysed, skipped`)
+      return
+    }
+    const io = makeIo($, stored.root)
+    const config = await loadConfig(io)
+    await log($, `seg ${s.id}: start (${s.turns.length} turns, ${s.tools.length} tool calls, current=${current})`)
+    if (!config.enabled) {
+      await $.store.delete(segKey(s))
+      await log($, `seg ${s.id}: archivist disabled for this project, dropped`)
+      return
+    }
+
+    const spentKey = BUDGET_KEY + today()
+    const spent = ((await $.store.get(spentKey)) as number | undefined) ?? 0
+    const limits = ((await $.session.usage()).rateLimits ?? []) as { kind: string; percentUsed: number }[]
+    const held =
+      spent >= config.analyzer.maxTokensPerDay
+        ? `daily budget used (${spent}/${config.analyzer.maxTokensPerDay})`
+        : limits
+            .filter((l) => l.percentUsed >= config.analyzer.maxRateLimitPercent)
+            .map((l) => `${l.kind} rate limit at ${l.percentUsed}%`)
+            .join(', ')
+    if (held) {
+      await log($, `seg ${s.id}: postponed: ${held}`)
+      $.ui.status(`📚 analysis postponed: ${held}`)
+      $.clock.after(RETRY_MS, async () => analyse($, stored, current))
+      return
+    }
+
+    $.ui.status('📚 analysing the last task…')
+    const result = await analyzeSegment({
+      io,
+      llm: makeLlm($, config),
+      config,
+      segment: s,
+      ...(current ? { messages: await readMessages($) } : {}),
+      now: new Date(),
+    })
+    // The task is done with, whatever came of it: never analyse it twice.
+    await $.store.delete(segKey(s))
+    await $.store.set(spentKey, spent + weightedTokens(result.usage))
+    await log(
+      $,
+      result.kind === 'skipped'
+        ? `seg ${s.id}: skipped: ${result.reason}`
+        : `seg ${s.id}: done: ${result.report.applied.length} applied, ${result.report.proposals.length} proposals, ` +
+            `${result.report.rejected.length} dropped, ${weightedTokens(result.usage)} weighted tokens` +
+            `${result.report.analysis.error ? `; ${result.report.analysis.error}` : ''} → ${result.reportPath}`,
+    )
+
+    if (result.kind === 'skipped') {
+      await refreshStatus($, io)
+      return
+    }
+    await $.store.set(LAST_KEY + stored.root, result.reportPath)
+    notice = noticeText(result.report)
+    $.ui.status(statusLine(result.report))
+    $.ui.toast(statusLine(result.report), { timeoutMs: config.report.toastMs })
+    if (config.report.mode === 'rewake' && current) {
+      ownTurnPending = true
+      await $.prompt.submit({
+        text: `Archivist report (informational; the task is finished, do not resume it). Tell the user in two or three lines what was recorded:\n\n${notice}`,
+      })
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
+    await log($, `seg ${s.id}: failed: ${msg}`)
+    $.ui.status('📚 analysis failed: /archivist log')
+  } finally {
+    analysing = false
+  }
+}
+
+export function register(on: On): void {
+  on('session.start', async ($, e, next) => {
+    root = await $.session.root()
+    session = await $.session.id()
+    await $.command.register({
+      name: 'archivist',
+      description: 'Archivist: what it learned from the last task (report) or the knowledge base status (status)',
+      argumentHint: '[report|status|log]',
+    })
+
+    // Tasks waiting for analysis: this session's (a module reload dropped their timer; the open one is closed
+    // here) get the full analysis, other sessions' (ended before it ran) only their journal.
+    const waiting = new Map<string, { stored: StoredSegment; current: boolean }>()
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(SEG_KEY)) continue
+      const s = (await $.store.get(key)) as StoredSegment | undefined
+      if (s?.root !== root) continue
+      if (key !== segKey(s.seg)) {
+        await $.store.set(segKey(s.seg), s)
+        await $.store.delete(key)
+      }
+      waiting.set(segKey(s.seg), { stored: s, current: s.seg.session === session })
+    }
+    if (waiting.size) {
+      await log($, `session.start: ${waiting.size} task(s) waiting for analysis`)
+      const config = await loadConfig(makeIo($, root))
+      $.clock.after(config.analyzer.idleSeconds * 1000, async () => {
+        for (const w of waiting.values()) await analyse($, w.stored, w.current)
+      })
+    }
+    await refreshStatus($, makeIo($, root))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    if (ownTurnPending) {
+      ownTurnPending = false
+      ownTurns.add(e.turnId)
+      return next(e)
+    }
+    idle?.cancel()
+    idle = undefined
+    seg ??= newSegment()
+    seg.prompts.push(e.text)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.PostToolUse', async ($, e, next) => {
+    if (seg) {
+      const ev: ToolEvent = { tool: e.tool_name, ok: true }
+      const target = toolTarget(root, e.tool_name, e.tool_input)
+      if (target) ev.target = target
+      if (e.duration_ms !== undefined) ev.durationMs = e.duration_ms
+      if (e.agent_id) ev.agent = e.agent_id
+      seg.tools.push(ev)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.PostToolUseFailure', async ($, e, next) => {
+    if (seg && !e.is_interrupt) {
+      const ev: ToolEvent = { tool: e.tool_name, ok: false, error: truncate(e.error.replace(/\s+/g, ' '), 300) }
+      const target = toolTarget(root, e.tool_name, e.tool_input)
+      if (target) ev.target = target
+      if (e.agent_id) ev.agent = e.agent_id
+      seg.tools.push(ev)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.InstructionsLoaded', async ($, e, next) => {
+    if (seg && e.file_path.includes(PATHS.rulesDir)) {
+      const r: { file: string; trigger?: string } = { file: relPath(root, e.file_path) }
+      if (e.trigger_file_path) r.trigger = relPath(root, e.trigger_file_path)
+      seg.rulesLoaded.push(r)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId !== undefined || ownTurns.has(e.turnId)) return r
+    if (seg) {
+      seg.turns.push({ turnId: e.turnId, durationMs: e.durationMs, usage: addUsage(emptyUsage(), toUsage(e.usage)) })
+      if (e.answer) seg.answers.push(truncate(e.answer, 2000))
+      await saveSegment($)
+      const config = await loadConfig(makeIo($, root))
+      if (config.enabled) {
+        idle?.cancel()
+        idle = $.clock.after(config.analyzer.idleSeconds * 1000, async () => {
+          idle = undefined
+          const s = seg
+          if (!s || analysing) return
+          seg = undefined
+          await analyse($, { root, seg: s }, true)
+        })
+      }
+    }
+    if (!notice) return r
+    const text = [r.text, notice].filter(Boolean).join('\n')
+    notice = undefined
+    return { ...r, text }
+  }).catch(($, e, next) => next(e))
+
+  on('command.run', { command: 'archivist' }, async ($, e) => {
+    const io = makeIo($, root)
+    if (e.args.trim() === 'log') {
+      const lines = ((await $.store.get(LOG_KEY)) as string[] | undefined) ?? []
+      return { text: lines.length ? lines.slice(-30).join('\n') : 'Archivist log is empty.' }
+    }
+    if (e.args.trim() === 'status') {
+      const state = await loadState(io)
+      const active = activeEntries(state.entries)
+      const by = (t: string) => active.filter((x) => x.type === t).length
+      const queued = (await io.list(PATHS.proposals)).length
+      const open = seg ? `open task: ${seg.turns.length} turns, ${seg.tools.length} tool calls` : 'no open task'
+      return {
+        text: [
+          `Archivist: ${active.length} active entries (${by('command')} commands, ${by('gotcha')} gotchas, ${by('decision')} decisions)`,
+          `${queued} proposals waiting for review in ${PATHS.proposals}/`,
+          open,
+          state.badLines.length ? `ledger: ${state.badLines.length} unreadable lines` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      }
+    }
+    const path = (await $.store.get(LAST_KEY + root)) as string | undefined
+    const text = path ? await io.read(path) : undefined
+    return { text: text ?? 'Archivist has no report yet: it writes one after a task that taught something.' }
+  })
+}

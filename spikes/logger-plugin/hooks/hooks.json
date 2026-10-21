@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" SessionStart" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" SessionEnd" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" UserPromptSubmit" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "async": true, "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" PostToolUse" }] }],
+    "PostToolUseFailure": [{ "matcher": "*", "hooks": [{ "type": "command", "async": true, "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" PostToolUseFailure" }] }],
+    "InstructionsLoaded": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" InstructionsLoaded" }] }],
+    "PreCompact": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" PreCompact" }] }],
+    "PostCompact": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" PostCompact" }] }],
+    "Stop": [{ "hooks": [
+      { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" Stop" },
+      { "type": "command", "async": true, "asyncRewake": true, "command": "node \"${CLAUDE_PLUGIN_ROOT}/log.mjs\" StopRewake" }
+    ] }]
+  }
+}

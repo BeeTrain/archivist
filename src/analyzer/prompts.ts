@@ -1,0 +1,67 @@
+import { truncate } from "../core/text.js";
+import type { Entry } from "../core/types.js";
+
+/**
+ * Asked of the main model over its own cached transcript ($.model.fork). It saw the whole task, including
+ * why things were decided, so it extracts; the cheap curator then turns notes into ops.
+ */
+export const reflectPrompt = (firstPrompt: string | undefined): string =>
+  [
+    "[Archivist plugin — a side question, not a task. Do not continue the work and do not call tools.]",
+    "",
+    firstPrompt
+      ? `Look ONLY at the most recent task: the messages from the user's request «${truncate(firstPrompt.trim(), 300)}» to now. Earlier work in this session is not part of it: leave it out even if it was instructive.`
+      : "Look ONLY at the most recent task in this session; leave earlier work out.",
+    "List only what would save time, tokens or context in FUTURE tasks in this project and that cannot be quickly derived from the code itself:",
+    "",
+    "COMMANDS: exact commands (build, test, lint, run, generate) that turned out to be right, especially after wrong attempts.",
+    "GOTCHAS: pitfalls and non-obvious constraints you hit: where (file or path) and how to avoid them.",
+    "DECISIONS: decisions made in this task: what was chosen, why, which alternatives were rejected; with files.",
+    "WASTE: where steps or tokens were wasted, and which single note would have prevented it.",
+    "",
+    "Rules: short bullets; give a file path as evidence when there is one; invent nothing; write «—» for an empty section;",
+    "no secrets, tokens or personal data; no overview of the codebase; at most 25 lines; write in the language of the user's request.",
+  ].join("\n");
+
+export const CURATE_SYSTEM = [
+  "You curate a small knowledge base that an AI coding agent reads at the start of every session in one project.",
+  "Every line it reads costs tokens in every future session, and agents follow everything written, so be strict:",
+  "- Keep only facts the agent cannot derive quickly from the code: exact commands, non-obvious pitfalls, decisions with their reasons.",
+  "- Never write overviews, directory structure, generic best practices, or anything already in the existing project docs.",
+  "- One atomic fact per entry: two facts are two entries, never one with a joint title.",
+  "- title: ≤ 8 words naming the fact. content: 1–2 lines, imperative, concrete (exact command, path, flag); it must not repeat the title.",
+  "- Prefer reinforcing or updating an existing entry over adding a near-duplicate.",
+  "- Deprecate an existing entry only when the notes clearly contradict it.",
+  "- A decision needs a rationale (why, and what was rejected).",
+  "- confidence: 0.9+ only for facts directly confirmed in the task (a command that ran, a decision the user approved); 0.5–0.7 for plausible but unverified; below 0.5 do not propose.",
+  "- Most tasks teach nothing durable: then return no ops.",
+  "",
+  "Answer with ONE JSON object and nothing else:",
+  '{"summary": "<one line: what this task taught, or why nothing>",',
+  ' "ops": [',
+  '  {"op":"add","type":"command|gotcha|decision","title":"<≤8 words>","content":"<1–2 lines>","rationale":"<why, decisions only>",',
+  '   "scope":{"paths":["src/db/**"]},"evidence":[{"file":"<project-relative path>","anchor":"<script/symbol/heading>"}],',
+  '   "confidence":0.0,"supersedes":["<id>"],"savings":{"toolCalls":0,"tokens":0}},',
+  '  {"op":"update","id":"<id>","content":"<new content>","confidence":0.0},',
+  '  {"op":"reinforce","id":"<id>"},',
+  '  {"op":"deprecate","id":"<id>","reason":"<why>","confidence":0.0}',
+  " ]}",
+  "Omit optional fields you have nothing for. savings: your estimate of tool calls and tokens a future similar task saves.",
+  "Write titles and content in the language of the notes.",
+].join("\n");
+
+export const curatePrompt = (args: { notes: string; notesKind: "reflection" | "digest"; signals: string; candidates: Entry[] }): string => {
+  const existing = args.candidates.length
+    ? args.candidates.map((e) => `- ${e.id} [${e.type}] ${e.title}: ${e.content.replace(/\n/g, " ")}`).join("\n")
+    : "(none yet)";
+  return [
+    "EXISTING ENTRIES (most relevant):",
+    existing,
+    "",
+    "TASK SIGNALS (measured):",
+    args.signals,
+    "",
+    args.notesKind === "reflection" ? "NOTES FROM THE AGENT THAT DID THE TASK:" : "TASK DIGEST (messages and tool calls):",
+    args.notes,
+  ].join("\n");
+};

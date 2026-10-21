@@ -1,0 +1,10 @@
+node_modules/
+plugin/hooks/register.js
+plugin/bin/
+.archivist/.local/
+*.log
+
+# This repo dogfoods Archivist, but its knowledge base is learned from private
+# development sessions: it stays on the developer's machine.
+.archivist/
+.claude/rules/archivist/
