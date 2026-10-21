@@ -1213,6 +1213,7 @@ var idle;
 var analysing = false;
 var notice;
 var ownTurnPending = false;
+var lastStatus;
 var ownTurns = /* @__PURE__ */ new Set();
 var newSegment = () => ({
   id: Date.now().toString(36),
@@ -1283,11 +1284,15 @@ async function readMessages($) {
     toolUses: (m.toolUses ?? []).map((t) => ({ tool: t.tool, input: t.input ?? {}, isError: t.isError, text: t.text }))
   }));
 }
+function showStatus($, text) {
+  lastStatus = text;
+  $.ui.status(text);
+}
 async function refreshStatus($, io) {
   const state = await loadState(io);
   const n = activeEntries(state.entries).length;
   const queued = (await listProposals(io)).length;
-  $.ui.status(n || queued ? `\u{1F4DA} ${n} entries${queued ? ` \xB7 ${queued} to review` : ""}` : void 0);
+  showStatus($, n || queued ? `\u{1F4DA} ${n} entries${queued ? ` \xB7 ${queued} to review` : ""}` : void 0);
 }
 async function analyse($, stored, current) {
   const s = stored.seg;
@@ -1317,11 +1322,11 @@ async function analyse($, stored, current) {
     const held = spent >= config.analyzer.maxTokensPerDay ? `daily budget used (${spent}/${config.analyzer.maxTokensPerDay})` : limits.filter((l) => l.percentUsed >= config.analyzer.maxRateLimitPercent).map((l) => `${l.kind} rate limit at ${l.percentUsed}%`).join(", ");
     if (held) {
       await log($, `seg ${s.id}: postponed: ${held}`);
-      $.ui.status(`\u{1F4DA} analysis postponed: ${held}`);
+      showStatus($, `\u{1F4DA} analysis postponed: ${held}`);
       $.clock.after(RETRY_MS, async () => analyse($, stored, current));
       return;
     }
-    $.ui.status("\u{1F4DA} analysing the last task\u2026");
+    showStatus($, "\u{1F4DA} analysing the last task\u2026");
     const result = await analyzeSegment({
       io,
       llm: makeLlm($, config),
@@ -1342,7 +1347,7 @@ async function analyse($, stored, current) {
     }
     await $.store.set(LAST_KEY + stored.root, result.reportPath);
     notice = noticeText(result.report);
-    $.ui.status(statusLine(result.report));
+    showStatus($, statusLine(result.report));
     $.ui.toast(statusLine(result.report), { timeoutMs: config.report.toastMs });
     if (config.report.mode === "rewake" && current) {
       ownTurnPending = true;
@@ -1356,7 +1361,7 @@ ${notice}`
     const msg = err instanceof Error ? `${err.message}
 ${err.stack ?? ""}` : String(err);
     await log($, `seg ${s.id}: failed: ${msg}`);
-    $.ui.status("\u{1F4DA} analysis failed: /archivist log");
+    showStatus($, "\u{1F4DA} analysis failed: /archivist log");
   } finally {
     analysing = false;
   }
@@ -1391,6 +1396,12 @@ function register(on) {
     }
     await refreshStatus($, makeIo($, root));
     return next(e);
+  }).catch(($, e, next) => next(e));
+  on("session.attach", async ($, e, next) => {
+    const r = await next(e);
+    if (lastStatus) $.ui.status(lastStatus);
+    else if (root) await refreshStatus($, makeIo($, root));
+    return r;
   }).catch(($, e, next) => next(e));
   on("turn.start", async ($, e, next) => {
     if (e.agentId !== void 0) return next(e);
@@ -1453,8 +1464,9 @@ function register(on) {
         });
       }
     }
+    if (lastStatus) $.ui.status(lastStatus);
     if (!notice) return r;
-    const text = [r.text, notice].filter(Boolean).join("\n");
+    const text = notice;
     notice = void 0;
     return { ...r, text };
   }).catch(($, e, next) => next(e));

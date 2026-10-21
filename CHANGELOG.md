@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1 — 2026-10-22
+
+- Fix: the notice under the next answer repeated the whole answer before Archivist's summary; it now holds the summary only.
+- Fix: the status line set at session start was lost when the app attached later; it is shown again on `session.attach` and after every turn.
+
 ## 1.1.0 — 2026-10-22
 
 - `archivist edit <id>` and `archivist deprecate <id> --reason …`, and the same as `/archivist edit|deprecate`: fix or retire what is already recorded. An empty `--paths` clears an entry's scope.
