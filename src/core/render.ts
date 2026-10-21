@@ -10,34 +10,30 @@ const scopeLabel = (e: Entry): string => (e.scope?.paths.length ? ` (${e.scope.p
 export const adrPath = (e: Entry): string =>
   joinPath(PATHS.decisions, `ADR-${String(e.adr ?? 0).padStart(4, "0")}-${slug(e.title)}.md`);
 
-/** Stable order: keeps the always-loaded file byte-identical between renders when nothing changed (prompt cache). */
+/** Stable order: keeps a loaded rule byte-identical between renders when nothing changed (prompt cache). */
 const byAge = (a: Entry, b: Entry): number => a.created.localeCompare(b.created) || a.id.localeCompare(b.id);
 
 const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, " ").trim();
 
-/** The always-loaded rule: commands and gotchas the agent cannot derive, pointers to decisions. Hard line budget. */
-export const renderCore = (entries: Entry[], config: Config): string => {
-  const active = entries.filter((e) => e.status === "active").sort(byAge);
-  const sections: { type: EntryType; heading: string; line: (e: Entry) => string }[] = [
-    { type: "command", heading: "## Commands", line: (e) => `- **${e.title}**: ${oneLine(e.content)}` },
-    { type: "gotcha", heading: "## Gotchas", line: (e) => `- **${e.title}**${scopeLabel(e)}: ${oneLine(e.content)}` },
-    {
-      type: "decision",
-      heading: "## Decisions",
-      line: (e) => `- ADR-${String(e.adr ?? 0).padStart(4, "0")} ${e.title}: ${oneLine(e.content)} → \`${adrPath(e)}\``,
-    },
-  ];
-  const head = [
-    GENERATED,
-    "# Project knowledge (Archivist)",
-    "",
-    "Facts learned in earlier sessions. Prefer them over re-discovering; if one is wrong, say so.",
-  ];
+type Section = { type: EntryType; heading: string; line: (e: Entry) => string };
+
+const SECTIONS: Section[] = [
+  { type: "command", heading: "## Commands", line: (e) => `- **${e.title}**: ${oneLine(e.content)}` },
+  { type: "gotcha", heading: "## Gotchas", line: (e) => `- **${e.title}**: ${oneLine(e.content)}` },
+  {
+    type: "decision",
+    heading: "## Decisions",
+    line: (e) => `- ADR-${String(e.adr ?? 0).padStart(4, "0")} ${e.title}${scopeLabel(e)}: ${oneLine(e.content)} → \`${adrPath(e)}\``,
+  },
+];
+
+/** Fills sections into `budget` lines after `head`; what does not fit is counted, not dropped silently. */
+const fill = (head: string[], entries: Entry[], budget: number): { lines: string[]; omitted: number } => {
   const lines = [...head];
-  let left = config.budgets.coreLines - head.length - 2;
+  let left = budget - head.length - 2;
   let omitted = 0;
-  for (const s of sections) {
-    const items = active.filter((e) => e.type === s.type);
+  for (const s of SECTIONS) {
+    const items = entries.filter((e) => e.type === s.type);
     if (!items.length) continue;
     // Newest decisions are the most relevant; commands and gotchas keep insertion order.
     const ordered = s.type === "decision" ? [...items].reverse() : items;
@@ -48,13 +44,46 @@ export const renderCore = (entries: Entry[], config: Config): string => {
     left -= fit.length + 2;
   }
   if (omitted) lines.push("", `${omitted} more in \`${PATHS.index}\` (run \`archivist recall <query>\`).`);
-  return lines.join("\n") + "\n";
+  return { lines, omitted };
 };
 
-export const renderIndex = (entries: Entry[]): string => {
+/** Live entries a rule file shows: active, and not stale (their evidence still exists). */
+const live = (entries: Entry[], stale: Set<string>): Entry[] => entries.filter((e) => e.status === "active" && !stale.has(e.id)).sort(byAge);
+
+const isScoped = (e: Entry): boolean => Boolean(e.scope?.paths.length) && e.type !== "decision";
+
+/** The always-loaded rule: what applies anywhere in the project, plus pointers to decisions. */
+export const renderCore = (entries: Entry[], config: Config, stale = new Set<string>()): string => {
+  const head = [GENERATED, "# Project knowledge (Archivist)", "", "Facts learned in earlier sessions. Prefer them over re-discovering; if one is wrong, say so."];
+  return fill(head, live(entries, stale).filter((e) => !isScoped(e)), config.budgets.coreLines).lines.join("\n") + "\n";
+};
+
+/**
+ * Commands and gotchas that only matter for some paths go to their own rule file with `paths:` frontmatter:
+ * Claude Code loads it the first time the agent reads or edits a matching file, and not before.
+ */
+export const renderAreas = (entries: Entry[], config: Config, stale = new Set<string>()): Map<string, string> => {
+  const groups = new Map<string, Entry[]>();
+  for (const e of live(entries, stale).filter(isScoped)) {
+    const key = [...e.scope!.paths].sort().join("\n");
+    groups.set(key, [...(groups.get(key) ?? []), e]);
+  }
+  const files = new Map<string, string>();
+  for (const [key, items] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+    const paths = key.split("\n");
+    const base = slug(paths[0]!.replace(/[*?{].*$/, "").replace(/\/+$/, "") || "area");
+    let name = joinPath(PATHS.rulesDir, `${base}.md`);
+    for (let i = 2; files.has(name) || name === PATHS.coreRule; i++) name = joinPath(PATHS.rulesDir, `${base}-${i}.md`);
+    const head = ["---", "paths:", ...paths.map((p) => `  - ${JSON.stringify(p)}`), "---", GENERATED, `# Project knowledge for ${paths.join(", ")} (Archivist)`];
+    files.set(name, fill(head, items, config.budgets.pathFileLines).lines.join("\n") + "\n");
+  }
+  return files;
+};
+
+export const renderIndex = (entries: Entry[], stale = new Set<string>()): string => {
   const active = entries.filter((e) => e.status === "active").sort(byAge);
-  const lines = [GENERATED, "# Archivist index", "", "One line per active entry: `id` type: title.", ""];
-  for (const e of active) lines.push(`- \`${e.id}\` ${e.type}${scopeLabel(e)}: ${e.title}`);
+  const lines = [GENERATED, "# Archivist index", "", "One line per active entry: `id` type (scope): title.", ""];
+  for (const e of active) lines.push(`- \`${e.id}\` ${e.type}${scopeLabel(e)}: ${e.title}${stale.has(e.id) ? " ⚠ stale: its evidence is gone" : ""}`);
   const gone = entries.filter((e) => e.status !== "active").length;
   if (gone) lines.push("", `${gone} deprecated entries are kept in the ledger.`);
   return lines.join("\n") + "\n";
@@ -84,13 +113,31 @@ export const renderAdr = (e: Entry): string => {
 };
 
 /** Every generated file and its content. */
-export const renderViews = (entries: Map<string, Entry>, config: Config): Map<string, string> => {
+export const renderViews = (entries: Map<string, Entry>, config: Config, stale = new Set<string>()): Map<string, string> => {
   const all = [...entries.values()];
   const views = new Map<string, string>();
-  views.set(PATHS.coreRule, renderCore(all, config));
-  views.set(PATHS.index, renderIndex(all));
+  views.set(PATHS.coreRule, renderCore(all, config, stale));
+  for (const [path, text] of renderAreas(all, config, stale)) views.set(path, text);
+  views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
   return views;
+};
+
+/**
+ * Entries whose cited files are all gone: the fact may no longer hold. They leave the rule files (not the
+ * ledger) until a file comes back or the entry is updated, so a refactor cannot leave the agent stale advice.
+ */
+export const findStale = async (io: Io, entries: Map<string, Entry>): Promise<Set<string>> => {
+  const stale = new Set<string>();
+  for (const e of entries.values()) {
+    if (e.status !== "active") continue;
+    const files = e.evidence.map((v) => v.file).filter((f): f is string => Boolean(f));
+    if (!files.length) continue;
+    let any = false;
+    for (const f of files) if (await io.exists(f)) any = true;
+    if (!any) stale.add(e.id);
+  }
+  return stale;
 };
 
 /** Writes only what changed: a rewrite of a loaded rule reaches the model as a diff, so churn costs context. */
@@ -102,4 +149,27 @@ export const writeViews = async (io: Io, views: Map<string, string>): Promise<st
     written.push(path);
   }
   return written;
+};
+
+/** Removes generated files no view produces any more (an area emptied, an ADR renamed). Never touches a file it did not write. */
+export const pruneViews = async (io: Io, views: Map<string, string>): Promise<string[]> => {
+  if (!io.remove) return [];
+  const removed: string[] = [];
+  for (const dir of [PATHS.rulesDir, PATHS.decisions]) {
+    for (const name of await io.list(dir)) {
+      const path = joinPath(dir, name);
+      if (!name.endsWith(".md") || views.has(path)) continue;
+      if (!((await io.read(path)) ?? "").slice(0, 600).includes(GENERATED)) continue;
+      await io.remove(path);
+      removed.push(path);
+    }
+  }
+  return removed;
+};
+
+/** Stale check, render, write, prune: what every writer of the ledger runs after it. */
+export const renderAll = async (io: Io, entries: Map<string, Entry>, config: Config): Promise<{ written: string[]; removed: string[]; stale: Set<string> }> => {
+  const stale = await findStale(io, entries);
+  const views = renderViews(entries, config, stale);
+  return { written: await writeViews(io, views), removed: await pruneViews(io, views), stale };
 };

@@ -3,6 +3,8 @@ import type { EntryType } from "./types.js";
 
 export interface Config {
   enabled: boolean;
+  /** Language of recorded entries: "auto" follows the user's prompts; otherwise a name such as "Russian" or "English". */
+  language: string;
   analyzer: {
     /** Quiet time after a turn before the task is considered done. */
     idleSeconds: number;
@@ -10,6 +12,11 @@ export interface Config {
     minToolCalls: number;
     /** "fork": ask the main model over its own cached transcript; "digest": only the cheap model over a digest. */
     reflect: "fork" | "digest";
+    /**
+     * Above this many tokens of live context, reflect falls back to the digest: fork re-reads the whole
+     * context from cache, and its price grows with the session while the task stays the same size.
+     */
+    forkMaxContextTokens: number;
     curateModel: string;
     /** Weighted tokens (cache reads count 0.1×) the analyzer may spend per day. */
     maxTokensPerDay: number;
@@ -23,7 +30,13 @@ export interface Config {
   budgets: {
     /** Lines in the always-loaded .claude/rules/archivist/core.md. */
     coreLines: number;
+    /** Lines in each path-scoped rule file, loaded only when the agent touches matching files. */
+    pathFileLines: number;
     maxContentChars: number;
+  };
+  privacy: {
+    /** Files that never reach the journal, a model or an entry's evidence. */
+    excludePaths: string[];
   };
   report: {
     mode: "quiet" | "rewake";
@@ -33,16 +46,19 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   enabled: true,
+  language: "auto",
   analyzer: {
     idleSeconds: 90,
     minToolCalls: 5,
     reflect: "fork",
+    forkMaxContextTokens: 300_000,
     curateModel: "haiku",
     maxTokensPerDay: 3_000_000,
     maxRateLimitPercent: 90,
   },
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
-  budgets: { coreLines: 60, maxContentChars: 400 },
+  budgets: { coreLines: 60, pathFileLines: 40, maxContentChars: 400 },
+  privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15_000 },
 };
 

@@ -4,7 +4,7 @@ import type { ProposedOp } from "../core/types.js";
 
 const USEFUL = /^(test|tests|build|lint|typecheck|type-check|check|dev|start|format|fmt|e2e|ci|verify)([:-].+)?$/;
 
-const titles: Record<string, string> = {
+const titlesEn: Record<string, string> = {
   test: "Run tests",
   tests: "Run tests",
   build: "Build",
@@ -21,9 +21,28 @@ const titles: Record<string, string> = {
   verify: "Verify",
 };
 
-const title = (name: string): string => {
+const titlesRu: Record<string, string> = {
+  test: "Запуск тестов",
+  tests: "Запуск тестов",
+  build: "Сборка",
+  lint: "Линтер",
+  typecheck: "Проверка типов",
+  "type-check": "Проверка типов",
+  check: "Все проверки",
+  dev: "Dev-сервер",
+  start: "Запуск",
+  format: "Форматирование",
+  fmt: "Форматирование",
+  e2e: "E2e-тесты",
+  ci: "CI локально",
+  verify: "Проверка",
+};
+
+const isRussian = (language: string): boolean => /^(ru|russian|рус)/i.test(language);
+
+const title = (name: string, language: string): string => {
   const [base, rest] = name.split(/[:-](.+)/);
-  const t = titles[base ?? name] ?? name;
+  const t = (isRussian(language) ? titlesRu : titlesEn)[base ?? name] ?? name;
   return rest ? `${t} (${rest})` : t;
 };
 
@@ -40,14 +59,14 @@ export const scriptCommand = (pm: string, name: string): string => {
   return `${pm} ${name}`;
 };
 
-export const scanCommands = async (io: Io): Promise<ProposedOp[]> => {
+export const scanCommands = async (io: Io, language = "auto"): Promise<ProposedOp[]> => {
   const ops: ProposedOp[] = [];
   const add = (name: string, cmd: string, detail: string, file: string, anchor: string) =>
     ops.push({
       op: "add",
       type: "command",
-      title: title(name),
-      content: `\`${cmd}\`${detail ? ` — ${detail}` : ""}`,
+      title: title(name, language),
+      content: `\`${cmd}\`${detail ? ` — ${isRussian(language) ? detail.replace(/^runs /, "запускает ") : detail}` : ""}`,
       evidence: [{ file, anchor }],
       confidence: 0.85,
     });

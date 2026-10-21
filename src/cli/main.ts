@@ -1,11 +1,13 @@
 // archivist CLI: the terminal side of the plugin. The Claude Code mod does the per-task work; this sets a
-// project up, shows what is recorded and checks the setup.
+// project up, records and reviews knowledge by hand, and checks the setup.
 import { execFileSync } from "node:child_process";
 import { DEFAULT_CONFIG, loadConfig } from "../core/config.js";
 import { PATHS, type Io } from "../core/io.js";
 import { activeEntries, appendLedger, loadState } from "../core/ledger.js";
-import { renderViews, writeViews } from "../core/render.js";
-import { validateOps } from "../core/validate.js";
+import { findStale, renderAll } from "../core/render.js";
+import { addEntry, applyProposals, listProposals, pick, reviewText, skipProposals } from "../core/review.js";
+import { ENTRY_TYPES, type EntryType } from "../core/types.js";
+import { validateOps, type Outcome } from "../core/validate.js";
 import { findRoot, nodeIo } from "./node-io.js";
 import { scanCommands } from "./scan.js";
 
@@ -13,14 +15,21 @@ const HELP = `archivist — project knowledge from coding-agent sessions
 
 Usage: archivist <command> [--root <dir>]
 
-  init      set up .archivist/ and seed exact build/test/lint commands from the project's manifests
-  status    what is recorded: entries by type, proposals waiting for review
-  report    print the latest task report (or: report <file>)
-  render    regenerate .claude/rules/archivist/ and .archivist/ views from the ledger
-  doctor    check the setup
+  init                  set up .archivist/ and seed exact build/test/lint commands from the project's manifests
+  status                what is recorded: entries by type, proposals waiting for review
+  report [file]         print the latest task report, or the given one
+  review                list the proposals waiting for review
+  apply <n|1,3|all>     record proposals as they are
+  skip <n|1,3|all>      drop proposals; the same idea is not proposed again
+  add --type <command|gotcha|decision> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
+                        record a fact by hand (decisions need --why)
+  render                regenerate the rule files, index and ADRs from the ledger
+  doctor                check the setup
 `;
 
 const MIN_CLAUDE = [2, 1, 290];
+
+const now = (): string => new Date().toISOString();
 
 const readDocs = async (io: Io): Promise<string[]> => {
   const out: string[] = [];
@@ -31,28 +40,29 @@ const readDocs = async (io: Io): Promise<string[]> => {
   return out;
 };
 
+const printOutcomes = (outcomes: Outcome[]): void => {
+  for (const o of outcomes) {
+    const what = o.op.op === "add" ? o.op.title : (o.title ?? ("id" in o.op ? o.op.id : ""));
+    console.log(`  ${o.reason && !o.id ? "·" : o.op.op === "reinforce" ? "↑" : "+"} [${o.type ?? "?"}] ${what}${o.reason ? ` (${o.reason})` : ""}`);
+  }
+};
+
+const printRender = (r: { written: string[]; removed: string[] }): void => {
+  for (const w of r.written) console.log(`  wrote ${w}`);
+  for (const w of r.removed) console.log(`  removed ${w}`);
+};
+
 const init = async (io: Io): Promise<void> => {
   if (!(await io.exists(PATHS.config))) await io.write(PATHS.config, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
   if (!(await io.exists(PATHS.gitignore))) await io.write(PATHS.gitignore, ".local/\n");
   const config = await loadConfig(io);
   const state = await loadState(io);
-  const v = await validateOps({
-    ops: await scanCommands(io),
-    entries: state.entries,
-    io,
-    config,
-    docs: await readDocs(io),
-    now: new Date().toISOString(),
-    source: "init",
-  });
+  const v = await validateOps({ ops: await scanCommands(io, config.language), entries: state.entries, io, config, docs: await readDocs(io), now: now(), source: "init" });
   await appendLedger(io, v.records);
-  const after = await loadState(io);
-  const written = await writeViews(io, renderViews(after.entries, config));
   console.log(`Archivist set up in ${io.root}`);
-  for (const o of v.applied) console.log(`  + [${o.type}] ${o.title}${o.reason ? ` (${o.reason})` : ""}`);
-  for (const o of v.rejected) console.log(`  · skipped ${o.op.op === "add" ? o.op.title : ""}: ${o.reason}`);
+  printOutcomes([...v.applied, ...v.rejected]);
   if (!v.applied.length) console.log("  no new commands found to record");
-  for (const w of written) console.log(`  wrote ${w}`);
+  printRender(await renderAll(io, (await loadState(io)).entries, config));
   console.log("Commit .archivist/ and .claude/rules/archivist/ to share the knowledge with your team.");
 };
 
@@ -60,11 +70,11 @@ const status = async (io: Io): Promise<void> => {
   const state = await loadState(io);
   const active = activeEntries(state.entries);
   const by = (t: string) => active.filter((e) => e.type === t).length;
-  const proposals = await io.list(PATHS.proposals);
+  const proposals = await listProposals(io);
   const reports = (await io.list(PATHS.reports)).sort();
   console.log(`${active.length} active entries: ${by("command")} commands, ${by("gotcha")} gotchas, ${by("decision")} decisions`);
   console.log(`${state.entries.size - active.length} deprecated`);
-  console.log(`${proposals.length} proposals waiting for review in ${PATHS.proposals}/`);
+  console.log(`${proposals.length} proposals waiting for review (archivist review)`);
   console.log(reports.length ? `latest report: ${PATHS.reports}/${reports.at(-1)}` : "no reports yet");
 };
 
@@ -72,18 +82,52 @@ const report = async (io: Io, which?: string): Promise<void> => {
   const reports = (await io.list(PATHS.reports)).sort();
   const file = which ?? (reports.length ? `${PATHS.reports}/${reports.at(-1)}` : undefined);
   const text = file ? await io.read(file) : undefined;
-  if (!text) {
-    console.log("No report yet: Archivist writes one after a task that taught something.");
-    return;
-  }
-  console.log(text);
+  console.log(text ?? "No report yet: Archivist writes one after a task that taught something.");
 };
 
-const render = async (io: Io): Promise<void> => {
-  const config = await loadConfig(io);
-  const state = await loadState(io);
-  const written = await writeViews(io, renderViews(state.entries, config));
-  console.log(written.length ? written.map((w) => `wrote ${w}`).join("\n") : "views are up to date");
+/** `--name value` options; repeated names keep the last value. */
+const options = (args: string[]): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith("--") && i + 1 < args.length) out[a.slice(2)] = args[++i]!;
+  }
+  return out;
+};
+
+const list = (s: string | undefined): string[] => (s ? s.split(",").map((x) => x.trim()).filter(Boolean) : []);
+
+const add = async (io: Io, args: string[]): Promise<number> => {
+  const o = options(args);
+  const type = o.type as EntryType;
+  if (!ENTRY_TYPES.includes(type) || !o.title || !o.content) {
+    console.error("add needs --type command|gotcha|decision, --title and --content");
+    return 2;
+  }
+  if (type === "decision" && !o.why) {
+    console.error("a decision needs --why: the reason, and what was rejected");
+    return 2;
+  }
+  const outcomes = await addEntry(
+    io,
+    await loadConfig(io),
+    { type, title: o.title, content: o.content, ...(o.why ? { rationale: o.why } : {}), paths: list(o.paths), evidence: list(o.evidence) },
+    now(),
+  );
+  printOutcomes(outcomes);
+  return outcomes.some((x) => x.id) ? 0 : 1;
+};
+
+const review = async (io: Io, verb: "apply" | "skip", which: string | undefined): Promise<number> => {
+  const proposals = await listProposals(io);
+  const chosen = which ? pick(proposals, which) : [];
+  if (!chosen.length) {
+    console.error(`${verb} needs proposal numbers from \`archivist review\` (or all)`);
+    return 2;
+  }
+  if (verb === "skip") console.log(`skipped ${await skipProposals(io, chosen, now())} proposal(s)`);
+  else printOutcomes(await applyProposals(io, await loadConfig(io), chosen, now()));
+  return 0;
 };
 
 const claudeVersion = (): number[] | undefined => {
@@ -123,9 +167,14 @@ const doctor = async (io: Io): Promise<boolean> => {
   const state = await loadState(io);
   check(!state.badLines.length, `ledger: ${state.entries.size} entries`, `unreadable lines: ${state.badLines.join(", ")}`);
   const config = await loadConfig(io);
-  const core = (await io.read(PATHS.coreRule)) ?? "";
-  const lines = core ? core.split("\n").length - 1 : 0;
-  check(lines <= config.budgets.coreLines, `${PATHS.coreRule}: ${lines}/${config.budgets.coreLines} lines`, "run `archivist render`");
+  for (const name of (await io.list(PATHS.rulesDir)).filter((n) => n.endsWith(".md"))) {
+    const path = `${PATHS.rulesDir}/${name}`;
+    const lines = ((await io.read(path)) ?? "").split("\n").length - 1;
+    const budget = path === PATHS.coreRule ? config.budgets.coreLines : config.budgets.pathFileLines + 6;
+    check(lines <= budget, `${path}: ${lines}/${budget} lines`, "run `archivist render`");
+  }
+  const stale = await findStale(io, state.entries);
+  check(!stale.size, `${stale.size} stale entries (cited files are gone)`, `review them in ${PATHS.index}: update or deprecate`);
   return ok;
 };
 
@@ -145,8 +194,16 @@ const main = async (): Promise<number> => {
     case "report":
       await report(io, rest[0]);
       return 0;
+    case "review":
+      console.log(reviewText(await listProposals(io)));
+      return 0;
+    case "apply":
+    case "skip":
+      return review(io, cmd, rest.join(","));
+    case "add":
+      return add(io, rest);
     case "render":
-      await render(io);
+      printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
       return 0;
     case "doctor":
       return (await doctor(io)) ? 0 : 1;

@@ -13,7 +13,7 @@ export interface Report {
   proposals: Outcome[];
   rejected: Outcome[];
   written: string[];
-  analysis: { reflect?: Usage; curate?: Usage; notesKind: "reflection" | "digest"; error?: string };
+  analysis: { reflect?: Usage; curate?: Usage; notesKind: "reflection" | "digest"; note?: string; error?: string };
 }
 
 const k = (n: number): string => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
@@ -39,7 +39,7 @@ export const statusLine = (r: Report): string => {
   const added = r.applied.filter((o) => o.op.op !== "reinforce").length;
   const parts = [added ? `+${added} ${added === 1 ? "entry" : "entries"}` : "nothing new"];
   if (r.proposals.length) parts.push(`${r.proposals.length} to review`);
-  parts.push("/archivist:report");
+  parts.push("/archivist");
   return `📚 ${parts.join(" · ")}`;
 };
 
@@ -68,7 +68,7 @@ export const reportMarkdown = (r: Report): string => {
   const cost = [a.reflect && `reflect in ${k(a.reflect.input + a.reflect.cacheRead)}/out ${k(a.reflect.output)}`, a.curate && `curate in ${k(a.curate.input)}/out ${k(a.curate.output)}`]
     .filter(Boolean)
     .join(", ");
-  lines.push("", `_Analysis: ${a.notesKind}${cost ? `; ${cost}` : ""}${a.error ? `; error: ${a.error}` : ""}_`, "");
+  lines.push("", `_Analysis: ${a.notesKind}${cost ? `; ${cost}` : ""}${a.note ? `; ${a.note}` : ""}${a.error ? `; error: ${a.error}` : ""}_`, "");
   return lines.filter((l, i, all) => !(l === "" && all[i - 1] === "")).join("\n");
 };
 

@@ -113,7 +113,7 @@ describe("analyzeSegment", () => {
     if (r.kind !== "done") throw new Error("expected a report");
     expect(r.report.applied.map((o) => o.type)).toEqual(["command", "decision"]);
     expect(r.report.proposals.map((o) => o.title)).toEqual(["Unsure"]);
-    expect(statusLine(r.report)).toBe("📚 +2 entries · 1 to review · /archivist:report");
+    expect(statusLine(r.report)).toBe("📚 +2 entries · 1 to review · /archivist");
     expect(io.files.get(PATHS.coreRule)).toContain("`npm run test:unit`");
     expect([...io.files.keys()].some((k) => k.startsWith(".archivist/decisions/ADR-0001-"))).toBe(true);
     expect([...io.files.keys()].filter((k) => k.startsWith(PATHS.proposals))).toHaveLength(1);

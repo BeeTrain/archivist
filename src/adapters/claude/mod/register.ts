@@ -7,9 +7,11 @@
 //   - work that must outlive a hook's dispatch runs on `$.clock.after`; a module reload drops timers,
 //     so the open task is kept in `$.store` after every turn and picked up again on `session.start`.
 import type { On } from 'claude-code'
-import { loadConfig, type Config } from '../../../core/config.js'
+import { DEFAULT_CONFIG, loadConfig, type Config } from '../../../core/config.js'
 import { PATHS, joinPath, relPath, type Io, type Llm, type LlmReply } from '../../../core/io.js'
 import { activeEntries, loadState } from '../../../core/ledger.js'
+import { isExcluded, redact } from '../../../core/privacy.js'
+import { applyProposals, describeOp, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
 import { truncate } from '../../../core/text.js'
 import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
 import { analyzeSegment } from '../../../analyzer/pipeline.js'
@@ -48,17 +50,20 @@ const toUsage = (u: ModUsage | undefined): Usage => ({
 
 const today = (): string => new Date().toISOString().slice(0, 10)
 
-/** What the journal keeps of a tool call: its target, never its content. */
-const toolTarget = (root: string, tool: string, input: unknown): string | undefined => {
+/** What the journal keeps of a tool call: its target, never its content; nothing at all for an excluded file. */
+const toolTarget = (root: string, tool: string, input: unknown, exclude: string[]): string | undefined => {
   const i = (input ?? {}) as Record<string, unknown>
   const v = i.file_path ?? i.notebook_path ?? i.command ?? i.pattern ?? i.path ?? i.url
   if (typeof v !== 'string') return undefined
-  return tool === 'Bash' ? truncate(v.replace(/\s+/g, ' ').trim(), 200) : relPath(root, v)
+  if (tool === 'Bash') return redact(truncate(v.replace(/\s+/g, ' ').trim(), 200)).text
+  const rel = relPath(root, v)
+  return isExcluded(rel, exclude) ? undefined : rel
 }
 
 // ── state of this module copy (reset on reload; the open segment is restored from $.store) ──
 let root = ''
 let session = ''
+let cfg: Config = DEFAULT_CONFIG
 let seg: Segment | undefined
 let idle: { cancel: () => void } | undefined
 let analysing = false
@@ -85,12 +90,12 @@ function makeIo($: any, base: string): Io {
       return (await $.fs.exists(abs(p))) ? await $.fs.read(abs(p)) : undefined
     },
     async write(p, text) {
-      try {
-        await $.fs.write(abs(p), text)
-      } catch {
-        await $.process.run(['mkdir', '-p', abs(p).replace(/\/[^/]*$/, '')])
-        await $.fs.write(abs(p), text)
-      }
+      // $.fs.write creates missing directories itself.
+      await $.fs.write(abs(p), text)
+    },
+    async remove(p) {
+      // $.fs has no delete: the generated file goes through the shell.
+      await $.process.run(['rm', '-f', abs(p)])
     },
     async exists(p) {
       return await $.fs.exists(abs(p))
@@ -149,7 +154,7 @@ async function readMessages($: any): Promise<Message[]> {
 async function refreshStatus($: any, io: Io): Promise<void> {
   const state = await loadState(io)
   const n = activeEntries(state.entries).length
-  const queued = (await io.list(PATHS.proposals)).length
+  const queued = (await listProposals(io)).length
   $.ui.status(n || queued ? `📚 ${n} entries${queued ? ` · ${queued} to review` : ''}` : undefined)
 }
 
@@ -179,7 +184,8 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
 
     const spentKey = BUDGET_KEY + today()
     const spent = ((await $.store.get(spentKey)) as number | undefined) ?? 0
-    const limits = ((await $.session.usage()).rateLimits ?? []) as { kind: string; percentUsed: number }[]
+    const usage = await $.session.usage()
+    const limits = (usage.rateLimits ?? []) as { kind: string; percentUsed: number }[]
     const held =
       spent >= config.analyzer.maxTokensPerDay
         ? `daily budget used (${spent}/${config.analyzer.maxTokensPerDay})`
@@ -200,7 +206,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
       llm: makeLlm($, config),
       config,
       segment: s,
-      ...(current ? { messages: await readMessages($) } : {}),
+      ...(current ? { messages: await readMessages($), contextTokens: usage.context?.tokens ?? 0 } : {}),
       now: new Date(),
     })
     // The task is done with, whatever came of it: never analyse it twice.
@@ -242,10 +248,11 @@ export function register(on: On): void {
   on('session.start', async ($, e, next) => {
     root = await $.session.root()
     session = await $.session.id()
+    cfg = await loadConfig(makeIo($, root))
     await $.command.register({
       name: 'archivist',
       description: 'Archivist: what it learned from the last task (report) or the knowledge base status (status)',
-      argumentHint: '[report|status|log]',
+      argumentHint: '[report|status|review|apply <n>|skip <n>|log]',
     })
 
     // Tasks waiting for analysis: this session's (a module reload dropped their timer; the open one is closed
@@ -289,7 +296,7 @@ export function register(on: On): void {
   on('classic.PostToolUse', async ($, e, next) => {
     if (seg) {
       const ev: ToolEvent = { tool: e.tool_name, ok: true }
-      const target = toolTarget(root, e.tool_name, e.tool_input)
+      const target = toolTarget(root, e.tool_name, e.tool_input, cfg.privacy.excludePaths)
       if (target) ev.target = target
       if (e.duration_ms !== undefined) ev.durationMs = e.duration_ms
       if (e.agent_id) ev.agent = e.agent_id
@@ -300,8 +307,8 @@ export function register(on: On): void {
 
   on('classic.PostToolUseFailure', async ($, e, next) => {
     if (seg && !e.is_interrupt) {
-      const ev: ToolEvent = { tool: e.tool_name, ok: false, error: truncate(e.error.replace(/\s+/g, ' '), 300) }
-      const target = toolTarget(root, e.tool_name, e.tool_input)
+      const ev: ToolEvent = { tool: e.tool_name, ok: false, error: redact(truncate(e.error.replace(/\s+/g, ' '), 300)).text }
+      const target = toolTarget(root, e.tool_name, e.tool_input, cfg.privacy.excludePaths)
       if (target) ev.target = target
       if (e.agent_id) ev.agent = e.agent_id
       seg.tools.push(ev)
@@ -325,7 +332,7 @@ export function register(on: On): void {
       seg.turns.push({ turnId: e.turnId, durationMs: e.durationMs, usage: addUsage(emptyUsage(), toUsage(e.usage)) })
       if (e.answer) seg.answers.push(truncate(e.answer, 2000))
       await saveSegment($)
-      const config = await loadConfig(makeIo($, root))
+      const config = (cfg = await loadConfig(makeIo($, root)))
       if (config.enabled) {
         idle?.cancel()
         idle = $.clock.after(config.analyzer.idleSeconds * 1000, async () => {
@@ -345,20 +352,35 @@ export function register(on: On): void {
 
   on('command.run', { command: 'archivist' }, async ($, e) => {
     const io = makeIo($, root)
-    if (e.args.trim() === 'log') {
+    const [verb = 'report', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
+    if (verb === 'log') {
       const lines = ((await $.store.get(LOG_KEY)) as string[] | undefined) ?? []
       return { text: lines.length ? lines.slice(-30).join('\n') : 'Archivist log is empty.' }
     }
-    if (e.args.trim() === 'status') {
+    if (verb === 'review') return { text: reviewText(await listProposals(io)) }
+    if (verb === 'apply' || verb === 'skip') {
+      const chosen = pick(await listProposals(io), rest.join(','))
+      if (!chosen.length) return { text: `Usage: /archivist ${verb} <n|1,3|all> — numbers from /archivist review.` }
+      const now = new Date().toISOString()
+      if (verb === 'skip') {
+        await skipProposals(io, chosen, now)
+        await refreshStatus($, io)
+        return { text: `Skipped: ${chosen.map((p) => describeOp(p.op)).join('; ')}. The same ideas will not be proposed again.` }
+      }
+      const outcomes = await applyProposals(io, cfg, chosen, now)
+      await refreshStatus($, io)
+      return { text: ['Recorded:', ...outcomes.map((o) => `- ${o.title ?? ''}${o.id ? ` \`${o.id}\`` : ''}${o.reason ? ` (${o.reason})` : ''}`)].join('\n') }
+    }
+    if (verb === 'status') {
       const state = await loadState(io)
       const active = activeEntries(state.entries)
       const by = (t: string) => active.filter((x) => x.type === t).length
-      const queued = (await io.list(PATHS.proposals)).length
+      const queued = (await listProposals(io)).length
       const open = seg ? `open task: ${seg.turns.length} turns, ${seg.tools.length} tool calls` : 'no open task'
       return {
         text: [
           `Archivist: ${active.length} active entries (${by('command')} commands, ${by('gotcha')} gotchas, ${by('decision')} decisions)`,
-          `${queued} proposals waiting for review in ${PATHS.proposals}/`,
+          `${queued} proposals waiting for review: /archivist review`,
           open,
           state.badLines.length ? `ledger: ${state.badLines.length} unreadable lines` : '',
         ]

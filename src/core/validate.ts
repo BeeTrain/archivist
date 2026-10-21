@@ -1,6 +1,7 @@
 import type { Config } from "./config.js";
 import type { Io } from "./io.js";
 import { newId, nextAdr } from "./ledger.js";
+import { isExcluded, redact } from "./privacy.js";
 import { jaccard, truncate } from "./text.js";
 import { ENTRY_TYPES, type Entry, type EntrySource, type EntryType, type LedgerRecord, type ProposedOp, type RecordSource } from "./types.js";
 
@@ -40,6 +41,8 @@ export const validateOps = async (args: {
   now: string;
   src?: RecordSource;
   source?: EntrySource;
+  /** Texts of proposals the user skipped: the same idea is not proposed again. */
+  skipped?: string[];
 }): Promise<Validated> => {
   const { ops, entries, io, config, now, src } = args;
   const out: Validated = { records: [], applied: [], proposals: [], rejected: [] };
@@ -67,14 +70,26 @@ export const validateOps = async (args: {
         out.rejected.push({ op, reason: `unknown type ${String(op.type)}` });
         continue;
       }
-      const title = truncate(String(op.title ?? "").trim(), 120);
-      const content = truncate(String(op.content ?? "").trim(), config.budgets.maxContentChars);
+      const t = redact(truncate(String(op.title ?? "").trim(), 120));
+      const c = redact(truncate(String(op.content ?? "").trim(), config.budgets.maxContentChars));
+      const r = op.rationale ? redact(truncate(String(op.rationale).trim(), config.budgets.maxContentChars)) : undefined;
+      const title = t.text;
+      const content = c.text;
       if (!title || !content) {
         out.rejected.push({ op, reason: "empty title or content" });
         continue;
       }
       let confidence = clamp01(op.confidence);
       const notes: string[] = [];
+      if (t.count + c.count + (r?.count ?? 0)) {
+        // A fact that needed a secret to state it is worth a human look before it lands in the repo.
+        confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+        notes.push("secrets redacted");
+      }
+      if ((args.skipped ?? []).some((s) => jaccard(s, `${title} ${content}`) >= DUP_ENTRY)) {
+        out.rejected.push({ op, reason: "skipped in an earlier review" });
+        continue;
+      }
 
       const dup = [...entries.values()].find(
         (e) => e.status === "active" && e.type === op.type && jaccard(`${e.title} ${e.content}`, `${title} ${content}`) >= DUP_ENTRY,
@@ -95,6 +110,7 @@ export const validateOps = async (args: {
       const evidence = [];
       for (const ev of op.evidence ?? []) {
         if (!ev || typeof ev !== "object") continue;
+        if (ev.file && isExcluded(ev.file, config.privacy.excludePaths)) continue;
         if (ev.file && !(await io.exists(ev.file))) {
           notes.push(`evidence file not found: ${ev.file}`);
           continue;
@@ -115,7 +131,7 @@ export const validateOps = async (args: {
         type: op.type,
         title,
         content,
-        ...(op.rationale ? { rationale: truncate(String(op.rationale).trim(), config.budgets.maxContentChars) } : {}),
+        ...(r ? { rationale: r.text } : {}),
         ...(op.scope?.paths?.length ? { scope: { paths: op.scope.paths.map(String) } } : {}),
         evidence,
         status: "active",
@@ -152,10 +168,11 @@ export const validateOps = async (args: {
       out.records.push({ v: 1, ts: now, op: "reinforce", id: target.id, src });
       out.applied.push(base);
     } else if (op.op === "update") {
+      const clean = (s: string, max: number) => redact(truncate(s.trim(), max)).text;
       const patch = {
-        ...(op.title ? { title: truncate(op.title.trim(), 120) } : {}),
-        ...(op.content ? { content: truncate(op.content.trim(), config.budgets.maxContentChars) } : {}),
-        ...(op.rationale ? { rationale: truncate(op.rationale.trim(), config.budgets.maxContentChars) } : {}),
+        ...(op.title ? { title: clean(op.title, 120) } : {}),
+        ...(op.content ? { content: clean(op.content, config.budgets.maxContentChars) } : {}),
+        ...(op.rationale ? { rationale: clean(op.rationale, config.budgets.maxContentChars) } : {}),
       };
       if (!Object.keys(patch).length) {
         out.rejected.push({ ...base, reason: "empty update" });

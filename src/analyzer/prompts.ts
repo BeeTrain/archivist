@@ -5,7 +5,9 @@ import type { Entry } from "../core/types.js";
  * Asked of the main model over its own cached transcript ($.model.fork). It saw the whole task, including
  * why things were decided, so it extracts; the cheap curator then turns notes into ops.
  */
-export const reflectPrompt = (firstPrompt: string | undefined): string =>
+const languageRule = (language: string, auto: string): string => (language === "auto" ? auto : `write in ${language}`);
+
+export const reflectPrompt = (firstPrompt: string | undefined, language = "auto"): string =>
   [
     "[Archivist plugin — a side question, not a task. Do not continue the work and do not call tools.]",
     "",
@@ -20,7 +22,7 @@ export const reflectPrompt = (firstPrompt: string | undefined): string =>
     "WASTE: where steps or tokens were wasted, and which single note would have prevented it.",
     "",
     "Rules: short bullets; give a file path as evidence when there is one; invent nothing; write «—» for an empty section;",
-    "no secrets, tokens or personal data; no overview of the codebase; at most 25 lines; write in the language of the user's request.",
+    `no secrets, tokens or personal data; no overview of the codebase; at most 25 lines; ${languageRule(language, "write in the language of the user's request")}.`,
   ].join("\n");
 
 export const CURATE_SYSTEM = [
@@ -50,11 +52,12 @@ export const CURATE_SYSTEM = [
   "Write titles and content in the language of the notes.",
 ].join("\n");
 
-export const curatePrompt = (args: { notes: string; notesKind: "reflection" | "digest"; signals: string; candidates: Entry[] }): string => {
+export const curatePrompt = (args: { notes: string; notesKind: "reflection" | "digest"; signals: string; candidates: Entry[]; language?: string }): string => {
   const existing = args.candidates.length
     ? args.candidates.map((e) => `- ${e.id} [${e.type}] ${e.title}: ${e.content.replace(/\n/g, " ")}`).join("\n")
     : "(none yet)";
   return [
+    ...(args.language && args.language !== "auto" ? [`LANGUAGE: write titles, content and rationale in ${args.language}.`, ""] : []),
     "EXISTING ENTRIES (most relevant):",
     existing,
     "",

@@ -17,7 +17,10 @@ export const memoryIo = (files: Record<string, string> = {}): Io & { files: Map<
       return map.has(p) || [...map.keys()].some((k) => k.startsWith(`${p}/`));
     },
     async list(dir) {
-      return [...map.keys()].filter((k) => k.startsWith(`${dir}/`)).map((k) => k.slice(dir.length + 1).split("/")[0]!);
+      return [...new Set([...map.keys()].filter((k) => k.startsWith(`${dir}/`)).map((k) => k.slice(dir.length + 1).split("/")[0]!))];
+    },
+    async remove(p) {
+      map.delete(p);
     },
   };
 };
