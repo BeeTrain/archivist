@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.3 — 2026-10-22
+
+- Only knowledge of the project: the curator no longer proposes the setup of the user's machine or accounts (dotfiles, global git config, shell, credentials), facts about other repositories, or what tools already enforce without the agent (git config, hooks, linters, CI).
+- `/archivist:triage` skips such proposals itself, decisions included, instead of asking the user; `remember` and `decide` decline them with a one-line reason.
+
 ## 1.3.2 — 2026-10-22
 
 - Fix: the status line kept showing an old review count after the queue was settled through the CLI (the triage skill, `archivist apply`/`skip`): the mod repeated the text it had set instead of counting again. It now recounts entries and the queue at the end of every turn and when an app attaches. "analysing", "postponed" and "failed" stay until the next analysis replaces them.
