@@ -57,6 +57,18 @@ export const coverage = (text: string, source: string): number => {
   return inter / (A.size || 1);
 };
 
+/** Standards and formats that look like ticket numbers: UTF-8, SHA-256, ISO-8601, RFC-2119, TLS-13… */
+const NOT_TICKETS = /^(UTF|UCS|ISO|SHA|MD|RFC|HTTP|TLS|SSL|IPV|IEEE|ECMA|ES|X|BASE|AES|RSA|CRC|PEP|JSR|KB|MB|GB)$/;
+
+/**
+ * A ticket reference (`ADANDTECH-2542`, `PROJ-12`), also inside a branch name (`tech/ADANDTECH-2542-uitests`).
+ * An entry carrying one is tied to the task at hand and goes stale with it.
+ */
+export const ticketRef = (s: string): string | undefined => {
+  for (const m of s.matchAll(/(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,14})-(\d{2,})(?!\d)/g)) if (!NOT_TICKETS.test(m[1]!)) return `${m[1]}-${m[2]}`;
+  return undefined;
+};
+
 /** The first code span of a text, normalized: what a command entry actually tells to run. */
 export const firstCode = (s: string): string | undefined => s.match(/`([^`]+)`/)?.[1]?.replace(/\s+/g, " ").trim();
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.4 — 2026-10-22
+
+- Entries tied to the task at hand are kept out: the curator is told not to carry ticket numbers, branches of the current work or epics, but the rule that outlives the task; `/archivist:triage` applies only that lasting part (and offers decisions in that form).
+- A safety net in code: an entry carrying a ticket reference (`ABC-123`, also inside a branch name) is never applied unattended, nor promoted on a repeat; it goes to review marked "tied to ticket …". Standards like UTF-8, SHA-256 or ISO-8601 are not mistaken for tickets.
+
 ## 1.3.3 — 2026-10-22
 
 - Only knowledge of the project: the curator no longer proposes the setup of the user's machine or accounts (dotfiles, global git config, shell, credentials), facts about other repositories, or what tools already enforce without the agent (git config, hooks, linters, CI).

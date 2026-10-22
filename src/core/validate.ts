@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import type { Io } from "./io.js";
 import { newId, nextAdr } from "./ledger.js";
 import { isExcluded, redact } from "./privacy.js";
-import { coverage, firstCode, jaccard, stemSimilarity, truncate } from "./text.js";
+import { coverage, firstCode, jaccard, stemSimilarity, ticketRef, truncate } from "./text.js";
 import { ENTRY_TYPES, type Entry, type EntrySource, type EntryType, type LedgerRecord, type ProposedOp, type RecordSource } from "./types.js";
 
 export interface Outcome {
@@ -138,6 +138,12 @@ export const validateOps = async (args: {
         confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
         notes.push("secrets redacted");
       }
+      const ticket = ticketRef(`${title} ${content} ${r?.text ?? ""}`);
+      if (ticket) {
+        // Tied to the task at hand, it goes stale with it: a person (or triage) keeps only the lasting part.
+        confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+        notes.push(`tied to ticket ${ticket}`);
+      }
       if ((args.skipped ?? []).some((s) => jaccard(s, `${title} ${content}`) >= DUP_ENTRY)) {
         out.rejected.push({ op, reason: "skipped in an earlier review" });
         continue;
@@ -214,7 +220,7 @@ export const validateOps = async (args: {
       // its first proposal still waits is applied. Decisions, workflows and anything that needed a secret masked
       // keep waiting for a person.
       const earlier =
-        route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted")
+        route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket
           ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title} ${content}`))
           : undefined;
       if (earlier) {
