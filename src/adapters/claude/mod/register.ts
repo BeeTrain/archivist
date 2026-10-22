@@ -15,6 +15,7 @@ import { applyProposals, deprecateEntry, describeOp, editEntry, editFromOptions,
 import { parseOptions, splitArgs } from '../../../core/args.js'
 import { healthText, recallText, statsText } from '../../../core/maintenance.js'
 import { logKey, withLine } from '../../../core/log.js'
+import { countsText, shouldRecount, type StatusKind } from '../../../core/status.js'
 import { truncate } from '../../../core/text.js'
 import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
 import { analyzeSegment } from '../../../analyzer/pipeline.js'
@@ -70,9 +71,9 @@ let idle: { cancel: () => void } | undefined
 let analysing = false
 let notice: string | undefined
 let ownTurnPending = false
-/** The status line as last set: shown again when a surface attaches and after each turn, since a status set
- *  before the app attached (at session.start) never reaches the screen. */
+/** The status line as last set, and what kind of message it is (see core/status.ts). */
 let lastStatus: string | undefined
+let statusKind: StatusKind | undefined
 const ownTurns = new Set<string>()
 
 const newSegment = (): Segment => ({
@@ -158,8 +159,9 @@ async function readMessages($: any): Promise<Message[]> {
   }))
 }
 
-function showStatus($: any, text: string | undefined): void {
+function showStatus($: any, text: string | undefined, kind: StatusKind): void {
   lastStatus = text
+  statusKind = kind
   $.ui.status(text)
 }
 
@@ -167,7 +169,7 @@ async function refreshStatus($: any, io: Io): Promise<void> {
   const state = await loadState(io)
   const n = activeEntries(state.entries).length
   const queued = (await listProposals(io)).length
-  showStatus($, n || queued ? `📚 ${n} entries${queued ? ` · ${queued} to review` : ''}` : undefined)
+  showStatus($, countsText(n, queued), 'counts')
 }
 
 /** Runs the pipeline over one finished task. `current` = it belongs to this live session (messages and fork available). */
@@ -207,12 +209,12 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
             .join(', ')
     if (held) {
       await log($, stored.root, `seg ${s.id}: postponed: ${held}`)
-      showStatus($, `📚 analysis postponed: ${held}`)
+      showStatus($, `📚 analysis postponed: ${held}`, 'event')
       $.clock.after(RETRY_MS, async () => analyse($, stored, current))
       return
     }
 
-    showStatus($, '📚 analysing the last task…')
+    showStatus($, '📚 analysing the last task…', 'event')
     const result = await analyzeSegment({
       io,
       llm: makeLlm($, config),
@@ -240,7 +242,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
     }
     await $.store.set(LAST_KEY + stored.root, result.reportPath)
     notice = noticeText(result.report)
-    showStatus($, statusLine(result.report))
+    showStatus($, statusLine(result.report), 'result')
     $.ui.toast(statusLine(result.report), { timeoutMs: config.report.toastMs })
     if (config.report.mode === 'rewake' && current) {
       ownTurnPending = true
@@ -251,7 +253,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
   } catch (err) {
     const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
     await log($, stored.root, `seg ${s.id}: failed: ${msg}`)
-    showStatus($, '📚 analysis failed: /archivist log')
+    showStatus($, '📚 analysis failed: /archivist log', 'event')
   } finally {
     analysing = false
   }
@@ -294,8 +296,9 @@ export function register(on: On): void {
 
   on('session.attach', async ($, e, next) => {
     const r = await next(e)
-    if (lastStatus) $.ui.status(lastStatus)
-    else if (root) await refreshStatus($, makeIo($, root))
+    // Recount: the queue may have changed outside the mod (a triage through the CLI) while no app was attached.
+    if (root && shouldRecount(statusKind)) await refreshStatus($, makeIo($, root))
+    else if (lastStatus) $.ui.status(lastStatus)
     return r
   }).catch(($, e, next) => next(e))
 
@@ -364,7 +367,10 @@ export function register(on: On): void {
         })
       }
     }
-    if (lastStatus) $.ui.status(lastStatus)
+    // The turn may have changed entries or the queue through the CLI (archivist apply/skip/edit, the triage skill):
+    // recount. An event (analysing, postponed, failed) stays until the next analysis replaces it.
+    if (root && shouldRecount(statusKind)) await refreshStatus($, makeIo($, root))
+    else if (lastStatus) $.ui.status(lastStatus)
     if (!notice) return r
     // r.text is the answer itself: replace it with the notice, never append to it, or the answer is shown twice.
     const text = notice

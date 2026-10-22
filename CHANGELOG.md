@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.2 — 2026-10-22
+
+- Fix: the status line kept showing an old review count after the queue was settled through the CLI (the triage skill, `archivist apply`/`skip`): the mod repeated the text it had set instead of counting again. It now recounts entries and the queue at the end of every turn and when an app attaches. "analysing", "postponed" and "failed" stay until the next analysis replaces them.
+
 ## 1.3.1 — 2026-10-22
 
 - core.md gets a character budget (`budgets.coreChars`, 6000 ≈ 2k tokens) besides its line budget, and path-scoped files one too (`budgets.pathFileChars`, 3000). Lines alone let long entries grow core.md to ~10k characters.
