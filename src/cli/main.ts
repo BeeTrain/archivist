@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { DEFAULT_CONFIG, loadConfig } from "../core/config.js";
 import { PATHS, type Io } from "../core/io.js";
 import { activeEntries, appendLedger, loadState } from "../core/ledger.js";
+import { withLock } from "../core/lock.js";
 import { findStale, renderAll } from "../core/render.js";
 import { commaList, parseOptions } from "../core/args.js";
 import { addEntry, applyProposals, deprecateEntry, editEntry, editFromOptions, listProposals, pick, reviewJson, reviewText, skipProposals } from "../core/review.js";
@@ -70,19 +71,20 @@ const printRender = (r: { written: string[]; removed: string[] }): void => {
   for (const w of r.removed) console.log(`  removed ${w}`);
 };
 
-const init = async (io: Io): Promise<void> => {
-  if (!(await io.exists(PATHS.config))) await io.write(PATHS.config, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
-  if (!(await io.exists(PATHS.gitignore))) await io.write(PATHS.gitignore, ".local/\n");
-  const config = await loadConfig(io);
-  const state = await loadState(io);
-  const v = await validateOps({ ops: await scanCommands(io, config.language), entries: state.entries, io, config, docs: await readDocs(io), now: now(), source: "init" });
-  await appendLedger(io, v.records);
-  console.log(`Archivist set up in ${io.root}`);
-  printOutcomes([...v.applied, ...v.rejected]);
-  if (!v.applied.length) console.log("  no new commands found to record");
-  printRender(await renderAll(io, (await loadState(io)).entries, config));
-  console.log("Commit .archivist/ and .claude/rules/archivist/ to share the knowledge with your team.");
-};
+const init = async (io: Io): Promise<void> =>
+  withLock(io, async () => {
+    if (!(await io.exists(PATHS.config))) await io.write(PATHS.config, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
+    if (!(await io.exists(PATHS.gitignore))) await io.write(PATHS.gitignore, ".local/\n");
+    const config = await loadConfig(io);
+    const state = await loadState(io);
+    const v = await validateOps({ ops: await scanCommands(io, config.language), entries: state.entries, io, config, docs: await readDocs(io), now: now(), source: "init" });
+    await appendLedger(io, v.records);
+    console.log(`Archivist set up in ${io.root}`);
+    printOutcomes([...v.applied, ...v.rejected]);
+    if (!v.applied.length) console.log("  no new commands found to record");
+    printRender(await renderAll(io, (await loadState(io)).entries, config));
+    console.log("Commit .archivist/ and .claude/rules/archivist/ to share the knowledge with your team.");
+  });
 
 const status = async (io: Io): Promise<void> => {
   const state = await loadState(io);
@@ -187,9 +189,15 @@ const gc = async (io: Io, args: string[]): Promise<void> => {
     console.log(`${quiet.length} entries unused for ${days} days. Run with --apply to retire them (they stay in the ledger).`);
     return;
   }
-  await appendLedger(io, gcRecords(quiet, days, now()));
-  printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
-  console.log(`retired ${quiet.length} entries`);
+  const retired = await withLock(io, async () => {
+    // Retire only what is still active: another writer may have changed the base since the list above.
+    const entries = (await loadState(io)).entries;
+    const still = quiet.filter((e) => entries.get(e.id)?.status === "active");
+    await appendLedger(io, gcRecords(still, days, now()));
+    printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
+    return still.length;
+  });
+  console.log(`retired ${retired} entries`);
 };
 
 const claudeVersion = (): number[] | undefined => {
@@ -272,7 +280,7 @@ const main = async (): Promise<number> => {
     case "deprecate":
       return change(io, cmd, rest);
     case "render":
-      printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
+      printRender(await withLock(io, async () => renderAll(io, (await loadState(io)).entries, await loadConfig(io))));
       return 0;
     case "recall":
       console.log(recallText((await loadState(io)).entries, rest.join(" ")));

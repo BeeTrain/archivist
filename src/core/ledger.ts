@@ -50,7 +50,7 @@ export const loadState = async (io: Io): Promise<KnowledgeState> => {
   return { entries: foldLedger(records), badLines };
 };
 
-/** Appends records. Callers hold the analysis lock, so there is one writer. */
+/** Appends records. Read-modify-write: callers hold the write lock (core/lock.ts), so there is one writer. */
 export const appendLedger = async (io: Io, records: LedgerRecord[]): Promise<void> => {
   if (!records.length) return;
   const prev = (await io.read(PATHS.ledger)) ?? "";

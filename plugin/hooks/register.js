@@ -274,6 +274,28 @@ var parseOptions = (tokens2) => {
 };
 var commaList = (s) => s ? s.split(",").map((x) => x.trim()).filter(Boolean) : [];
 
+// src/core/lock.ts
+var LOCK = ".archivist/.local/lock";
+var STALE_MS = 2 * 6e4;
+var WAIT_MS = 3e4;
+var POLL_MS = 100;
+var withLock = async (io, fn, waitMs = WAIT_MS) => {
+  const m = io.mutex;
+  if (!m) return fn();
+  for (let waited = 0; !await m.claim(LOCK); waited += POLL_MS) {
+    const age = await m.age(LOCK);
+    if (age !== void 0 && age > STALE_MS) await m.release(LOCK);
+    else if (waited >= waitMs)
+      throw new Error(`${LOCK} is held by another Archivist writer${age === void 0 ? "" : ` (for ${Math.round(age / 1e3)} s)`}; if none is running, remove that directory`);
+    await m.sleep(POLL_MS);
+  }
+  try {
+    return await fn();
+  } finally {
+    await m.release(LOCK);
+  }
+};
+
 // src/core/types.ts
 var ENTRY_TYPES = ["command", "gotcha", "decision", "procedure"];
 var emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -827,21 +849,27 @@ var record = async (io, config, ops, now, src) => {
   await renderAll(io, (await loadState(io)).entries, config);
   return [...v.applied, ...v.rejected];
 };
-var applyProposals = async (io, config, chosen, now) => {
+var stillWaiting = async (io, chosen) => {
+  const out = [];
+  for (const p of chosen) if (await io.exists(p.path)) out.push(p);
+  return out;
+};
+var applyProposals = async (io, config, chosen, now) => withLock(io, async () => {
   const outcomes = [];
-  for (const p of chosen) {
+  for (const p of await stillWaiting(io, chosen)) {
     outcomes.push(...await record(io, config, [{ ...p.op, confidence: 1 }], now, p.src));
     await io.remove?.(p.path);
   }
   return outcomes;
-};
-var skipProposals = async (io, chosen, now) => {
+});
+var skipProposals = async (io, chosen, now) => withLock(io, async () => {
+  const waiting = await stillWaiting(io, chosen);
   const prev = await io.read(SKIPPED) ?? "";
-  const lines = chosen.map((p) => JSON.stringify({ ts: now, text: p.op.op === "add" ? `${p.op.title} ${p.op.content}` : describeOp(p.op) }));
+  const lines = waiting.map((p) => JSON.stringify({ ts: now, text: p.op.op === "add" ? `${p.op.title} ${p.op.content}` : describeOp(p.op) }));
   if (lines.length) await io.write(SKIPPED, prev + lines.join("\n") + "\n");
-  for (const p of chosen) await io.remove?.(p.path);
-  return chosen.length;
-};
+  for (const p of waiting) await io.remove?.(p.path);
+  return waiting.length;
+});
 var loadSkipped = async (io) => (await io.read(SKIPPED) ?? "").split("\n").filter(Boolean).flatMap((l) => {
   try {
     return [String(JSON.parse(l).text)];
@@ -859,7 +887,7 @@ var activeEntry = async (io, id) => {
   const e = (await loadState(io)).entries.get(id);
   return e && e.status === "active" ? e : void 0;
 };
-var editEntry = async (io, config, id, edit, now) => {
+var editEntry = async (io, config, id, edit, now) => withLock(io, async () => {
   const e = await activeEntry(io, id);
   if (!e) return { ok: false, reason: `no active entry ${id}` };
   const max = e.type === "procedure" ? 1500 : config.budgets.maxContentChars;
@@ -874,8 +902,8 @@ var editEntry = async (io, config, id, edit, now) => {
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
   return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
-};
-var deprecateEntry = async (io, config, id, reason, now) => {
+});
+var deprecateEntry = async (io, config, id, reason, now) => withLock(io, async () => {
   const e = await activeEntry(io, id);
   if (!e) return { ok: false, reason: `no active entry ${id}` };
   if (!reason.trim()) return { ok: false, reason: "say why: --reason" };
@@ -883,7 +911,7 @@ var deprecateEntry = async (io, config, id, reason, now) => {
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
   return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
-};
+});
 var expireProposals = async (io, config, now) => {
   const tasks = (await loadMetrics(io)).filter((m) => m.source === "live").map((m) => m.ts);
   const gone = [];
@@ -1311,6 +1339,7 @@ var pickCandidates = (entries, seg2, edits, k2 = TOP_K) => {
   for (const e of [...scoped, ...ranked]) if (!out.includes(e) && out.length < k2) out.push(e);
   return out;
 };
+var committed = async (io, segment) => (await loadAnalyses(io)).some((a) => a.segment === segment) || parseLedger(await io.read(PATHS.ledger) ?? "").records.some((r) => r.src?.segment === segment) || (await listProposals(io)).some((p) => p.src?.segment === segment);
 var readDocs = async (io) => {
   const out = [];
   for (const p of DOCS) {
@@ -1324,21 +1353,30 @@ var analyzeSegment = async (args) => {
   const ts = now.toISOString();
   const signals = computeSignals(seg2);
   let usage = emptyUsage();
-  await appendMetrics(io, toMetrics(signals, ts, "live"));
-  const expired = await expireProposals(io, config, now);
-  const state = await loadState(io);
-  const active = activeEntries(state.entries);
-  const known = new Set(active.map((e) => e.id));
-  const loaded = new Set(signals.rulesLoaded);
-  const seen = [...groupAreas(active)].filter(([path]) => loaded.has(path)).flatMap(([, a]) => a.items.map((e) => e.id));
-  const used = commandsUsed(active, seg2.tools);
-  const counters = await loadUsage(io);
-  recordUse(counters, { seen, used, feedback: [], known, ts });
-  await saveUsage(io, counters);
-  if (isTrivial(signals, config)) {
-    await appendAnalysis(io, { ts, outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 });
-    return { kind: "skipped", reason: "trivial task", usage };
-  }
+  const pre = await withLock(io, async () => {
+    if (await committed(io, seg2.id)) {
+      await renderAll(io, (await loadState(io)).entries, config);
+      return void 0;
+    }
+    const state2 = await loadState(io);
+    const active2 = activeEntries(state2.entries);
+    const loaded = new Set(signals.rulesLoaded);
+    const seen2 = [...groupAreas(active2)].filter(([path]) => loaded.has(path)).flatMap(([, a]) => a.items.map((e) => e.id));
+    const used2 = commandsUsed(active2, seg2.tools);
+    if (!(await loadMetrics(io)).some((m) => m.segment === seg2.id)) {
+      await appendMetrics(io, { ...toMetrics(signals, ts, "live"), segment: seg2.id });
+      const counters = await loadUsage(io);
+      recordUse(counters, { seen: seen2, used: used2, feedback: [], known: new Set(active2.map((e) => e.id)), ts });
+      await saveUsage(io, counters);
+    }
+    const expired2 = await expireProposals(io, config, now);
+    const trivial = isTrivial(signals, config);
+    if (trivial) await appendAnalysis(io, { ts, segment: seg2.id, outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 });
+    return { state: state2, active: active2, seen: seen2, used: used2, expired: expired2, trivial };
+  });
+  if (!pre) return { kind: "skipped", reason: "already analysed", usage };
+  if (pre.trivial) return { kind: "skipped", reason: "trivial task", usage };
+  const { state, active, seen, used, expired } = pre;
   const candidates = pickCandidates(active, seg2, signals.edits);
   const inPlay = [];
   for (const e of [...[...seen, ...used].map((id) => state.entries.get(id)), ...candidates]) if (!inPlay.includes(e) && inPlay.length < 20) inPlay.push(e);
@@ -1365,68 +1403,82 @@ var analyzeSegment = async (args) => {
   const reply = c.ok ? parseCuratorReply(c.text) : void 0;
   if (!c.ok) error = [error, `curate: ${c.reason}`].filter(Boolean).join("; ");
   else if (!reply) error = [error, "curate: reply was not JSON"].filter(Boolean).join("; ");
-  const src = { segment: seg2.id };
-  const v = await validateOps({
-    ops: reply?.ops ?? [],
-    entries: state.entries,
-    io,
-    config,
-    docs: await readDocs(io),
-    now: ts,
-    src,
-    skipped: await loadSkipped(io),
-    procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => JSON.parse(l).text),
-    pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op }))
+  return withLock(io, async () => {
+    const state2 = await loadState(io);
+    const known = new Set(activeEntries(state2.entries).map((e) => e.id));
+    const src = { segment: seg2.id };
+    const v = await validateOps({
+      ops: reply?.ops ?? [],
+      entries: state2.entries,
+      io,
+      config,
+      docs: await readDocs(io),
+      now: ts,
+      src,
+      skipped: await loadSkipped(io),
+      procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => JSON.parse(l).text),
+      pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op }))
+    });
+    for (const p of (await listProposals(io)).filter((p2) => v.promoted.includes(p2.id))) await io.remove?.(p.path);
+    await appendLedger(io, v.records);
+    if (v.firstSightings.length)
+      await io.write(CANDIDATES, (await io.read(CANDIDATES) ?? "") + v.firstSightings.map((text) => JSON.stringify({ ts, text })).join("\n") + "\n");
+    const { written, removed } = await renderAll(io, (await loadState(io)).entries, config);
+    written.push(...removed.map((r) => `${r} (removed)`));
+    const reinforced = v.applied.filter((o) => o.op.op === "reinforce" && o.id).map((o) => o.id);
+    const counters = await loadUsage(io);
+    const harmful = recordUse(counters, { seen: [], used: reinforced, feedback: reply?.feedback ?? [], known, ts });
+    await saveUsage(io, counters);
+    const proposals = [...v.proposals];
+    const pending = new Set((await listProposals(io)).filter((p) => p.op.op === "deprecate").map((p) => "id" in p.op ? p.op.id : ""));
+    for (const id of harmful.filter((h) => !pending.has(h))) {
+      const e = state2.entries.get(id);
+      const reason = `judged wrong in ${counters[id].harmful} tasks, helpful in ${counters[id].helpful}`;
+      proposals.push({ op: { op: "deprecate", id, reason, confidence: 0.7 }, id, type: e.type, title: e.title, reason });
+    }
+    for (const [i, p] of proposals.entries()) written.push(await writeProposal(io, ts, i, src, p.op, p.reason));
+    const report = {
+      ts,
+      session: seg2.session,
+      segment: seg2.id,
+      title: truncate((seg2.prompts[0] ?? "task").replace(/\s+/g, " "), 80),
+      summary: reply?.summary ?? "",
+      signals,
+      applied: v.applied,
+      proposals,
+      rejected: v.rejected,
+      written,
+      analysis: { notesKind, ...reflectUsage ? { reflect: reflectUsage } : {}, curate: curateUsage, ...note ? { note } : {}, ...error ? { error } : {} }
+    };
+    const reportPath = joinPath(PATHS.reports, `${ts.replace(/[:.]/g, "-")}.md`);
+    await io.write(reportPath, reportMarkdown(report));
+    await appendAnalysis(io, {
+      ts,
+      segment: seg2.id,
+      outcome: "done",
+      applied: v.applied.filter((o) => o.op.op !== "reinforce").length,
+      proposals: proposals.length,
+      dropped: v.rejected.length,
+      tokens: weightedTokens(usage),
+      ...error ? { error } : {}
+    });
+    return { kind: "done", report, reportPath, usage };
   });
-  for (const p of (await listProposals(io)).filter((p2) => v.promoted.includes(p2.id))) await io.remove?.(p.path);
-  await appendLedger(io, v.records);
-  if (v.firstSightings.length)
-    await io.write(CANDIDATES, (await io.read(CANDIDATES) ?? "") + v.firstSightings.map((text) => JSON.stringify({ ts, text })).join("\n") + "\n");
-  const { written, removed } = await renderAll(io, (await loadState(io)).entries, config);
-  written.push(...removed.map((r) => `${r} (removed)`));
-  const reinforced = v.applied.filter((o) => o.op.op === "reinforce" && o.id).map((o) => o.id);
-  const harmful = recordUse(counters, { seen: [], used: reinforced, feedback: reply?.feedback ?? [], known, ts });
-  await saveUsage(io, counters);
-  const proposals = [...v.proposals];
-  const pending = new Set((await listProposals(io)).filter((p) => p.op.op === "deprecate").map((p) => "id" in p.op ? p.op.id : ""));
-  for (const id of harmful.filter((h) => !pending.has(h))) {
-    const e = state.entries.get(id);
-    const reason = `judged wrong in ${counters[id].harmful} tasks, helpful in ${counters[id].helpful}`;
-    proposals.push({ op: { op: "deprecate", id, reason, confidence: 0.7 }, id, type: e.type, title: e.title, reason });
-  }
-  for (const [i, p] of proposals.entries()) written.push(await writeProposal(io, ts, i, src, p.op, p.reason));
-  const report = {
-    ts,
-    session: seg2.session,
-    segment: seg2.id,
-    title: truncate((seg2.prompts[0] ?? "task").replace(/\s+/g, " "), 80),
-    summary: reply?.summary ?? "",
-    signals,
-    applied: v.applied,
-    proposals,
-    rejected: v.rejected,
-    written,
-    analysis: { notesKind, ...reflectUsage ? { reflect: reflectUsage } : {}, curate: curateUsage, ...note ? { note } : {}, ...error ? { error } : {} }
-  };
-  const reportPath = joinPath(PATHS.reports, `${ts.replace(/[:.]/g, "-")}.md`);
-  await io.write(reportPath, reportMarkdown(report));
-  await appendAnalysis(io, {
-    ts,
-    outcome: "done",
-    applied: v.applied.filter((o) => o.op.op !== "reinforce").length,
-    proposals: proposals.length,
-    dropped: v.rejected.length,
-    tokens: weightedTokens(usage),
-    ...error ? { error } : {}
-  });
-  return { kind: "done", report, reportPath, usage };
 };
+
+// src/core/attempts.ts
+var MAX_FAILURES = 3;
+var afterFailure = (failures = 0) => ({
+  failures: failures + 1,
+  drop: failures + 1 >= MAX_FAILURES
+});
 
 // src/adapters/claude/mod/register.ts
 var SEG_KEY = "archivist:seg:";
 var BUDGET_KEY = "archivist:budget:";
 var LAST_KEY = "archivist:last:";
 var RETRY_MS = 15 * 6e4;
+var BUSY_RETRY_MS = 6e4;
 var FORK_TIMEOUT_MS = 12e4;
 var segKey = (s) => `${SEG_KEY}${s.session}:${s.id}`;
 var toUsage2 = (u) => ({
@@ -1488,6 +1540,26 @@ function makeIo($, base) {
       if (!await $.fs.exists(abs(dir))) return [];
       const entries = await $.fs.list(abs(dir));
       return entries.map((e) => e.name);
+    },
+    // $.fs has no exclusive create: mkdir through the shell is the atomic step, and fails when the lock exists.
+    mutex: {
+      async claim(p) {
+        await $.process.run(["mkdir", "-p", abs(p).replace(/\/[^/]+$/, "")]);
+        return (await $.process.run(["mkdir", abs(p)])).exitCode === 0;
+      },
+      async age(p) {
+        try {
+          return Date.now() - (await $.fs.stat(abs(p))).mtimeMs;
+        } catch {
+          return void 0;
+        }
+      },
+      async release(p) {
+        await $.process.run(["rmdir", abs(p)]);
+      },
+      async sleep(ms) {
+        await $.clock.sleep(ms);
+      }
     }
   });
 }
@@ -1541,7 +1613,7 @@ async function analyse($, stored, current) {
   const s = stored.seg;
   if (analysing) {
     await log($, stored.root, `seg ${s.id}: another analysis is running, retry later`);
-    $.clock.after(RETRY_MS, async () => analyse($, stored, current));
+    $.clock.after(BUSY_RETRY_MS, async () => analyse($, stored, current));
     return;
   }
   analysing = true;
@@ -1604,7 +1676,15 @@ ${notice}`
   } catch (err) {
     const msg = err instanceof Error ? `${err.message}
 ${err.stack ?? ""}` : String(err);
-    await log($, stored.root, `seg ${s.id}: failed: ${msg}`);
+    const kept = await $.store.get(segKey(s));
+    const { failures, drop } = afterFailure(kept?.failures);
+    if (drop) await $.store.delete(segKey(s));
+    else if (kept) await $.store.set(segKey(s), { ...kept, failures });
+    await log(
+      $,
+      stored.root,
+      `seg ${s.id}: failed (${failures}/${MAX_FAILURES}${drop ? ", given up" : ", retried at the next session start"}): ${msg}`
+    );
     showStatus($, "\u{1F4DA} analysis failed: /archivist log", "event");
   } finally {
     analysing = false;
@@ -1702,7 +1782,7 @@ function register(on) {
         idle = $.clock.after(config.analyzer.idleSeconds * 1e3, async () => {
           idle = void 0;
           const s = seg;
-          if (!s || analysing) return;
+          if (!s) return;
           seg = void 0;
           await analyse($, { root, seg: s }, true);
         });

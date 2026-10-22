@@ -1,10 +1,13 @@
 // Segment → signals → (gate) → reflect → curate → validate → ledger → views → report.
+// The model calls run outside the write lock (they take minutes); what is written goes through it in two short
+// sections, and the second validates against the base as it is then, not as it was before the model calls.
 import type { Config } from "../core/config.js";
 import { PATHS, joinPath, type Io, type Llm } from "../core/io.js";
-import { activeEntries, appendLedger, loadState } from "../core/ledger.js";
+import { activeEntries, appendLedger, loadState, parseLedger } from "../core/ledger.js";
+import { withLock } from "../core/lock.js";
 import { redact } from "../core/privacy.js";
 import { groupAreas, renderAll } from "../core/render.js";
-import { appendAnalysis, appendMetrics, toMetrics } from "../core/metrics.js";
+import { appendAnalysis, appendMetrics, loadAnalyses, loadMetrics, toMetrics } from "../core/metrics.js";
 import { commandsUsed, loadUsage, recordUse, saveUsage } from "../core/usage.js";
 import { expireProposals, listProposals, loadSkipped } from "../core/review.js";
 import { bm25, globToRegExp, truncate } from "../core/text.js";
@@ -45,6 +48,16 @@ export const pickCandidates = (entries: Entry[], seg: Segment, edits: string[], 
   return out;
 };
 
+/**
+ * Whether a task's results are written already, wholly or in part. The mod retries a task whose analysis threw;
+ * one that threw after the ledger write must not record its facts twice, or a fact it proposed would count as its
+ * own repeat and be promoted.
+ */
+const committed = async (io: Io, segment: string): Promise<boolean> =>
+  (await loadAnalyses(io)).some((a) => a.segment === segment) ||
+  parseLedger((await io.read(PATHS.ledger)) ?? "").records.some((r) => r.src?.segment === segment) ||
+  (await listProposals(io)).some((p) => p.src?.segment === segment);
+
 const readDocs = async (io: Io): Promise<string[]> => {
   const out: string[] = [];
   for (const p of DOCS) {
@@ -69,25 +82,35 @@ export const analyzeSegment = async (args: {
   const ts = now.toISOString();
   const signals = computeSignals(seg);
   let usage = emptyUsage();
-  // Every task is measured, trivial ones too: the metrics are what tells whether the knowledge pays off.
-  await appendMetrics(io, toMetrics(signals, ts, "live"));
-  const expired = await expireProposals(io, config, now);
 
-  const state = await loadState(io);
-  const active = activeEntries(state.entries);
-  const known = new Set(active.map((e) => e.id));
-  // Entries the task demonstrably met: rule files Claude Code loaded for it, and recorded commands it ran.
-  const loaded = new Set(signals.rulesLoaded);
-  const seen = [...groupAreas(active)].filter(([path]) => loaded.has(path)).flatMap(([, a]) => a.items.map((e) => e.id));
-  const used = commandsUsed(active, seg.tools);
-  const counters = await loadUsage(io);
-  recordUse(counters, { seen, used, feedback: [], known, ts });
-  await saveUsage(io, counters);
-
-  if (isTrivial(signals, config)) {
-    await appendAnalysis(io, { ts, outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 });
-    return { kind: "skipped", reason: "trivial task", usage };
-  }
+  const pre = await withLock(io, async () => {
+    if (await committed(io, seg.id)) {
+      // A retry after a failure past the ledger write: what was written stays, the views catch up with it.
+      await renderAll(io, (await loadState(io)).entries, config);
+      return undefined;
+    }
+    const state = await loadState(io);
+    const active = activeEntries(state.entries);
+    // Entries the task demonstrably met: rule files Claude Code loaded for it, and recorded commands it ran.
+    const loaded = new Set(signals.rulesLoaded);
+    const seen = [...groupAreas(active)].filter(([path]) => loaded.has(path)).flatMap(([, a]) => a.items.map((e) => e.id));
+    const used = commandsUsed(active, seg.tools);
+    // Every task is measured, trivial ones too: the metrics are what tells whether the knowledge pays off.
+    // Once: a retry finds the task measured and its counters counted.
+    if (!(await loadMetrics(io)).some((m) => m.segment === seg.id)) {
+      await appendMetrics(io, { ...toMetrics(signals, ts, "live"), segment: seg.id });
+      const counters = await loadUsage(io);
+      recordUse(counters, { seen, used, feedback: [], known: new Set(active.map((e) => e.id)), ts });
+      await saveUsage(io, counters);
+    }
+    const expired = await expireProposals(io, config, now);
+    const trivial = isTrivial(signals, config);
+    if (trivial) await appendAnalysis(io, { ts, segment: seg.id, outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 });
+    return { state, active, seen, used, expired, trivial };
+  });
+  if (!pre) return { kind: "skipped", reason: "already analysed", usage };
+  if (pre.trivial) return { kind: "skipped", reason: "trivial task", usage };
+  const { state, active, seen, used, expired } = pre;
 
   const candidates = pickCandidates(active, seg, signals.edits);
   // What the task met first, then what is relevant to it: the reflection is asked about these.
@@ -125,65 +148,72 @@ export const analyzeSegment = async (args: {
   if (!c.ok) error = [error, `curate: ${c.reason}`].filter(Boolean).join("; ");
   else if (!reply) error = [error, "curate: reply was not JSON"].filter(Boolean).join("; ");
 
-  // 3. Validate, apply, render.
-  const src = { segment: seg.id };
-  const v = await validateOps({
-    ops: reply?.ops ?? [],
-    entries: state.entries,
-    io,
-    config,
-    docs: await readDocs(io),
-    now: ts,
-    src,
-    skipped: await loadSkipped(io),
-    procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => (JSON.parse(l) as { text: string }).text),
-    pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op })),
-  });
-  // A repeat applied these: their proposals are settled.
-  for (const p of (await listProposals(io)).filter((p) => v.promoted.includes(p.id))) await io.remove?.(p.path);
-  await appendLedger(io, v.records);
-  if (v.firstSightings.length)
-    await io.write(CANDIDATES, ((await io.read(CANDIDATES)) ?? "") + v.firstSightings.map((text) => JSON.stringify({ ts, text })).join("\n") + "\n");
-  const { written, removed } = await renderAll(io, (await loadState(io)).entries, config);
-  written.push(...removed.map((r) => `${r} (removed)`));
+  // 3. Validate, apply, render: against the base as it is now, since the CLI or another session may have
+  // recorded something while the models ran (a duplicate becomes a reinforce, ADR numbers stay unique).
+  return withLock(io, async () => {
+    const state = await loadState(io);
+    const known = new Set(activeEntries(state.entries).map((e) => e.id));
+    const src = { segment: seg.id };
+    const v = await validateOps({
+      ops: reply?.ops ?? [],
+      entries: state.entries,
+      io,
+      config,
+      docs: await readDocs(io),
+      now: ts,
+      src,
+      skipped: await loadSkipped(io),
+      procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => (JSON.parse(l) as { text: string }).text),
+      pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op })),
+    });
+    // A repeat applied these: their proposals are settled.
+    for (const p of (await listProposals(io)).filter((p) => v.promoted.includes(p.id))) await io.remove?.(p.path);
+    await appendLedger(io, v.records);
+    if (v.firstSightings.length)
+      await io.write(CANDIDATES, ((await io.read(CANDIDATES)) ?? "") + v.firstSightings.map((text) => JSON.stringify({ ts, text })).join("\n") + "\n");
+    const { written, removed } = await renderAll(io, (await loadState(io)).entries, config);
+    written.push(...removed.map((r) => `${r} (removed)`));
 
-  // 4. Self-correction: what the agent says helped or misled feeds the counters; a fact that keeps misleading
-  // is put up for removal (a human decides: removing knowledge is the riskier edit).
-  const reinforced = v.applied.filter((o) => o.op.op === "reinforce" && o.id).map((o) => o.id!);
-  const harmful = recordUse(counters, { seen: [], used: reinforced, feedback: reply?.feedback ?? [], known, ts });
-  await saveUsage(io, counters);
-  const proposals = [...v.proposals];
-  const pending = new Set((await listProposals(io)).filter((p) => p.op.op === "deprecate").map((p) => ("id" in p.op ? p.op.id : "")));
-  for (const id of harmful.filter((h) => !pending.has(h))) {
-    const e = state.entries.get(id)!;
-    const reason = `judged wrong in ${counters[id]!.harmful} tasks, helpful in ${counters[id]!.helpful}`;
-    proposals.push({ op: { op: "deprecate", id, reason, confidence: 0.7 }, id, type: e.type, title: e.title, reason });
-  }
-  for (const [i, p] of proposals.entries()) written.push(await writeProposal(io, ts, i, src, p.op, p.reason));
+    // 4. Self-correction: what the agent says helped or misled feeds the counters; a fact that keeps misleading
+    // is put up for removal (a human decides: removing knowledge is the riskier edit).
+    const reinforced = v.applied.filter((o) => o.op.op === "reinforce" && o.id).map((o) => o.id!);
+    const counters = await loadUsage(io);
+    const harmful = recordUse(counters, { seen: [], used: reinforced, feedback: reply?.feedback ?? [], known, ts });
+    await saveUsage(io, counters);
+    const proposals = [...v.proposals];
+    const pending = new Set((await listProposals(io)).filter((p) => p.op.op === "deprecate").map((p) => ("id" in p.op ? p.op.id : "")));
+    for (const id of harmful.filter((h) => !pending.has(h))) {
+      const e = state.entries.get(id)!;
+      const reason = `judged wrong in ${counters[id]!.harmful} tasks, helpful in ${counters[id]!.helpful}`;
+      proposals.push({ op: { op: "deprecate", id, reason, confidence: 0.7 }, id, type: e.type, title: e.title, reason });
+    }
+    for (const [i, p] of proposals.entries()) written.push(await writeProposal(io, ts, i, src, p.op, p.reason));
 
-  const report: Report = {
-    ts,
-    session: seg.session,
-    segment: seg.id,
-    title: truncate((seg.prompts[0] ?? "task").replace(/\s+/g, " "), 80),
-    summary: reply?.summary ?? "",
-    signals,
-    applied: v.applied,
-    proposals,
-    rejected: v.rejected,
-    written,
-    analysis: { notesKind, ...(reflectUsage ? { reflect: reflectUsage } : {}), curate: curateUsage, ...(note ? { note } : {}), ...(error ? { error } : {}) },
-  };
-  const reportPath = joinPath(PATHS.reports, `${ts.replace(/[:.]/g, "-")}.md`);
-  await io.write(reportPath, reportMarkdown(report));
-  await appendAnalysis(io, {
-    ts,
-    outcome: "done",
-    applied: v.applied.filter((o) => o.op.op !== "reinforce").length,
-    proposals: proposals.length,
-    dropped: v.rejected.length,
-    tokens: weightedTokens(usage),
-    ...(error ? { error } : {}),
+    const report: Report = {
+      ts,
+      session: seg.session,
+      segment: seg.id,
+      title: truncate((seg.prompts[0] ?? "task").replace(/\s+/g, " "), 80),
+      summary: reply?.summary ?? "",
+      signals,
+      applied: v.applied,
+      proposals,
+      rejected: v.rejected,
+      written,
+      analysis: { notesKind, ...(reflectUsage ? { reflect: reflectUsage } : {}), curate: curateUsage, ...(note ? { note } : {}), ...(error ? { error } : {}) },
+    };
+    const reportPath = joinPath(PATHS.reports, `${ts.replace(/[:.]/g, "-")}.md`);
+    await io.write(reportPath, reportMarkdown(report));
+    await appendAnalysis(io, {
+      ts,
+      segment: seg.id,
+      outcome: "done",
+      applied: v.applied.filter((o) => o.op.op !== "reinforce").length,
+      proposals: proposals.length,
+      dropped: v.rejected.length,
+      tokens: weightedTokens(usage),
+      ...(error ? { error } : {}),
+    });
+    return { kind: "done", report, reportPath, usage } satisfies AnalysisResult;
   });
-  return { kind: "done", report, reportPath, usage };
 };

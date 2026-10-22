@@ -86,8 +86,8 @@ describe("usage and self-correction", () => {
       { tool: "Bash", target: "pnpm vitest run src/x", ok: false, error: "no vitest" },
       { tool: "Edit", target: "src/x.ts", ok: true },
     ]);
-    for (let i = 0; i < 3; i++) await analyzeSegment({ io, llm, config: config(), segment: task, messages: [{ role: "user", text: "fix" }], now: new Date(ts) });
-    await analyzeSegment({ io, llm, config: config(), segment: segment([{ tool: "Read", target: "a", ok: true }]), now: new Date(ts) });
+    for (let i = 0; i < 3; i++) await analyzeSegment({ io, llm, config: config(), segment: { ...task, id: `seg${i}` }, messages: [{ role: "user", text: "fix" }], now: new Date(ts) });
+    await analyzeSegment({ io, llm, config: config(), segment: { ...segment([{ tool: "Read", target: "a", ok: true }]), id: "seg3" }, now: new Date(ts) });
     expect((await loadMetrics(io)).length).toBe(4);
     expect((await loadUsage(io))["cmd-a"]).toMatchObject({ harmful: 3, helpful: 0 });
     const deprecations = (await listProposals(io)).filter((p) => p.op.op === "deprecate");
