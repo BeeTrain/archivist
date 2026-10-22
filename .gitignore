@@ -6,3 +6,4 @@ node_modules/
 # development sessions: it stays on the developer's machine.
 .archivist/
 .claude/rules/archivist/
+.idea/
