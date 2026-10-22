@@ -7,6 +7,8 @@ Record one decision as an Archivist ADR, so later sessions follow it instead of 
 
 The decision: $ARGUMENTS (if empty, take it from the conversation: the approach just agreed on).
 
+Only decisions about this project. A choice about the user's machine or accounts (global git config, dotfiles, shell), another repository, or something a tool already enforces without the agent is not one: do not record it, and say in one line why.
+
 1. State it:
    - title: at most 8 words, the choice itself ("Stream CSV exports", not "CSV discussion");
    - content: 1–2 imperative lines saying what to do;

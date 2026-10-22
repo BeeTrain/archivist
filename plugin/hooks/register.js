@@ -166,6 +166,11 @@ var coverage = (text, source) => {
   for (const t of A) if (B.has(t)) inter++;
   return inter / (A.size || 1);
 };
+var NOT_TICKETS = /^(UTF|UCS|ISO|SHA|MD|RFC|HTTP|TLS|SSL|IPV|IEEE|ECMA|ES|X|BASE|AES|RSA|CRC|PEP|JSR|KB|MB|GB)$/;
+var ticketRef = (s) => {
+  for (const m of s.matchAll(/(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,14})-(\d{2,})(?!\d)/g)) if (!NOT_TICKETS.test(m[1])) return `${m[1]}-${m[2]}`;
+  return void 0;
+};
 var firstCode = (s) => s.match(/`([^`]+)`/)?.[1]?.replace(/\s+/g, " ").trim();
 var bm25 = (docs, query, k1 = 1.2, b = 0.75) => {
   const docTokens = docs.map(searchTokens);
@@ -688,6 +693,11 @@ var validateOps = async (args) => {
         confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
         notes.push("secrets redacted");
       }
+      const ticket = ticketRef(`${title} ${content} ${r?.text ?? ""}`);
+      if (ticket) {
+        confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+        notes.push(`tied to ticket ${ticket}`);
+      }
       if ((args.skipped ?? []).some((s) => jaccard(s, `${title} ${content}`) >= DUP_ENTRY)) {
         out.rejected.push({ op, reason: "skipped in an earlier review" });
         continue;
@@ -754,7 +764,7 @@ var validateOps = async (args) => {
         ...op.savings && (op.savings.toolCalls || op.savings.tokens) ? { savings: { toolCalls: Number(op.savings.toolCalls) || 0, tokens: Number(op.savings.tokens) || 0 } } : {},
         reinforced: 0
       };
-      const earlier = route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title} ${content}`)) : void 0;
+      const earlier = route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title} ${content}`)) : void 0;
       if (earlier) {
         entry.confidence = Math.max(entry.confidence, config.apply.autoConfidence);
         notes.push("proposed again in a later task");
@@ -1164,6 +1174,8 @@ var CURATE_SYSTEM = [
   "- Never write overviews, directory structure, generic best practices, or anything already in the existing project docs.",
   "- Never record one-off operations the task already finished (creating a repo, setting up credentials, rewriting a commit): only what a future task will need again.",
   '- Never record temporary state or to-dos ("revert X after the test", "not run yet", "until phase 4"): only facts that stay true.',
+  '- Never tie an entry to the task at hand: no ticket numbers (ABC-123), no branch names of the current work, no epic. State the rule that outlives the task without them ("each batch gets its own branch, merged locally", not "branch tech/ABC-123-\u2026"), or leave it out.',
+  "- Only knowledge of THIS project: never the user's machine or accounts (dotfiles, global git config, shell setup, credentials), never other repositories, never what tools already enforce without the agent (git config, hooks, linters, CI). The test: would an agent working in this project act differently because of it, and could it not learn it from the code, the docs or the tools?",
   "- One atomic fact per entry: two facts are two entries, never one with a joint title.",
   "- title: \u2264 8 words naming the fact. content: 1\u20132 lines, imperative, concrete (exact command, path, flag); it must not repeat the title.",
   "- Prefer reinforcing or updating an existing entry over adding a near-duplicate.",

@@ -39,6 +39,8 @@ export const CURATE_SYSTEM = [
   "- Never write overviews, directory structure, generic best practices, or anything already in the existing project docs.",
   "- Never record one-off operations the task already finished (creating a repo, setting up credentials, rewriting a commit): only what a future task will need again.",
   "- Never record temporary state or to-dos (\"revert X after the test\", \"not run yet\", \"until phase 4\"): only facts that stay true.",
+  "- Never tie an entry to the task at hand: no ticket numbers (ABC-123), no branch names of the current work, no epic. State the rule that outlives the task without them (\"each batch gets its own branch, merged locally\", not \"branch tech/ABC-123-…\"), or leave it out.",
+  "- Only knowledge of THIS project: never the user's machine or accounts (dotfiles, global git config, shell setup, credentials), never other repositories, never what tools already enforce without the agent (git config, hooks, linters, CI). The test: would an agent working in this project act differently because of it, and could it not learn it from the code, the docs or the tools?",
   "- One atomic fact per entry: two facts are two entries, never one with a joint title.",
   "- title: ≤ 8 words naming the fact. content: 1–2 lines, imperative, concrete (exact command, path, flag); it must not repeat the title.",
   "- Prefer reinforcing or updating an existing entry over adding a near-duplicate.",

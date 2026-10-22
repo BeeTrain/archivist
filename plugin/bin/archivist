@@ -193,6 +193,11 @@ var coverage = (text, source) => {
   for (const t of A) if (B.has(t)) inter++;
   return inter / (A.size || 1);
 };
+var NOT_TICKETS = /^(UTF|UCS|ISO|SHA|MD|RFC|HTTP|TLS|SSL|IPV|IEEE|ECMA|ES|X|BASE|AES|RSA|CRC|PEP|JSR|KB|MB|GB)$/;
+var ticketRef = (s) => {
+  for (const m of s.matchAll(/(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,14})-(\d{2,})(?!\d)/g)) if (!NOT_TICKETS.test(m[1])) return `${m[1]}-${m[2]}`;
+  return void 0;
+};
 var firstCode = (s) => s.match(/`([^`]+)`/)?.[1]?.replace(/\s+/g, " ").trim();
 var bm25 = (docs, query, k1 = 1.2, b = 0.75) => {
   const docTokens = docs.map(searchTokens);
@@ -642,6 +647,11 @@ var validateOps = async (args) => {
         confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
         notes.push("secrets redacted");
       }
+      const ticket = ticketRef(`${title2} ${content} ${r?.text ?? ""}`);
+      if (ticket) {
+        confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+        notes.push(`tied to ticket ${ticket}`);
+      }
       if ((args.skipped ?? []).some((s) => jaccard(s, `${title2} ${content}`) >= DUP_ENTRY)) {
         out.rejected.push({ op, reason: "skipped in an earlier review" });
         continue;
@@ -708,7 +718,7 @@ var validateOps = async (args) => {
         ...op.savings && (op.savings.toolCalls || op.savings.tokens) ? { savings: { toolCalls: Number(op.savings.toolCalls) || 0, tokens: Number(op.savings.tokens) || 0 } } : {},
         reinforced: 0
       };
-      const earlier = route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title2} ${content}`)) : void 0;
+      const earlier = route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title2} ${content}`)) : void 0;
       if (earlier) {
         entry.confidence = Math.max(entry.confidence, config.apply.autoConfidence);
         notes.push("proposed again in a later task");
