@@ -1351,7 +1351,7 @@ var pickCandidates = (entries, seg2, edits, k2 = TOP_K) => {
   for (const e of [...scoped, ...ranked]) if (!out.includes(e) && out.length < k2) out.push(e);
   return out;
 };
-var committed = async (io, segment) => (await loadAnalyses(io)).some((a) => a.segment === segment) || parseLedger(await io.read(PATHS.ledger) ?? "").records.some((r) => r.src?.segment === segment) || (await listProposals(io)).some((p) => p.src?.segment === segment);
+var alreadyAnalysed = async (io, segment) => (await loadAnalyses(io)).some((a) => a.segment === segment) || parseLedger(await io.read(PATHS.ledger) ?? "").records.some((r) => r.src?.segment === segment) || (await listProposals(io)).some((p) => p.src?.segment === segment);
 var readDocs = async (io) => {
   const out = [];
   for (const p of DOCS) {
@@ -1366,7 +1366,7 @@ var analyzeSegment = async (args) => {
   const signals = computeSignals(seg2);
   let usage = emptyUsage();
   const pre = await withLock(io, async () => {
-    if (await committed(io, seg2.id)) {
+    if (await alreadyAnalysed(io, seg2.id)) {
       await renderAll(io, (await loadState(io)).entries, config);
       return void 0;
     }
@@ -1553,7 +1553,6 @@ function makeIo($, base) {
       const entries = await $.fs.list(abs(dir));
       return entries.map((e) => e.name);
     },
-    // $.fs has no exclusive create: mkdir through the shell is the atomic step, and fails when the lock exists.
     mutex: {
       async claim(p) {
         await $.process.run(["mkdir", "-p", abs(p).replace(/\/[^/]+$/, "")]);

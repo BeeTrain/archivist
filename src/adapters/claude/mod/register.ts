@@ -27,14 +27,12 @@ const BUDGET_KEY = 'archivist:budget:'
 const LAST_KEY = 'archivist:last:'
 /** Wait before trying again when a budget or rate limit held the analysis back. */
 const RETRY_MS = 15 * 60_000
-/** Wait before trying again when this copy of the mod is analysing another task: an analysis takes minutes. */
 const BUSY_RETRY_MS = 60_000
 const FORK_TIMEOUT_MS = 120_000
 
 interface StoredSegment {
   root: string
   seg: Segment
-  /** Analyses of this task that threw: it is given up after MAX_FAILURES. */
   failures?: number
 }
 
@@ -119,14 +117,12 @@ function makeIo($: any, base: string): Io {
       const entries = (await $.fs.list(abs(dir))) as { name: string }[]
       return entries.map((e) => e.name)
     },
-    // $.fs has no exclusive create: mkdir through the shell is the atomic step, and fails when the lock exists.
     mutex: {
       async claim(p) {
         await $.process.run(['mkdir', '-p', abs(p).replace(/\/[^/]+$/, '')])
         return (await $.process.run(['mkdir', abs(p)])).exitCode === 0
       },
       async age(p) {
-        // Released between the failed claim and this look: absent.
         try {
           return Date.now() - (await $.fs.stat(abs(p))).mtimeMs
         } catch {
@@ -278,8 +274,6 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
     }
   } catch (err) {
     const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
-    // The task stays for the next session start, a limited number of times. A retry does not write twice
-    // what the failed run already wrote (see `committed` in the pipeline).
     const kept = (await $.store.get(segKey(s))) as StoredSegment | undefined
     const { failures, drop } = afterFailure(kept?.failures)
     if (drop) await $.store.delete(segKey(s))
@@ -398,8 +392,6 @@ export function register(on: On): void {
           idle = undefined
           const s = seg
           if (!s) return
-          // The task ends here whatever else runs: the next prompt opens a new one. A busy analysis does not
-          // keep it open, or the next task would be journalled into it; analyse() queues it instead.
           seg = undefined
           await analyse($, { root, seg: s }, true)
         })

@@ -190,7 +190,6 @@ const gc = async (io: Io, args: string[]): Promise<void> => {
     return;
   }
   const retired = await withLock(io, async () => {
-    // Retire only what is still active: another writer may have changed the base since the list above.
     const entries = (await loadState(io)).entries;
     const still = quiet.filter((e) => entries.get(e.id)?.status === "active");
     await appendLedger(io, gcRecords(still, days, now()));
