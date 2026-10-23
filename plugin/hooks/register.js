@@ -1242,9 +1242,17 @@ var findOpenVikingServer = (tools) => {
   return void 0;
 };
 var isNotFound = (text) => /not found: viking:\/\//i.test(text) && !text.trim().includes("\n");
+var unwrapped = (text) => {
+  try {
+    const value = JSON.parse(text);
+    return typeof value?.result === "string" ? value.result : text;
+  } catch {
+    return text;
+  }
+};
 var textOrThrow = (reply) => {
   if (reply.isError) throw new Error(reply.text.trim());
-  return reply.text;
+  return unwrapped(reply.text);
 };
 var openVikingStore = (call, project) => {
   const folder = `viking://resources/archivist/${project}/`;
@@ -1260,9 +1268,10 @@ var openVikingStore = (call, project) => {
       if (reply.isError && !isNotFound(reply.text)) throw new Error(reply.text.trim());
     },
     async fetch(id) {
-      const reply = await call("read", { uris: uriOf(id) });
+      const reply = await call("read", { uris: [uriOf(id)] });
       if (isNotFound(reply.text)) return void 0;
-      return { ref: uriOf(id), text: textOrThrow(reply) };
+      if (reply.isError) throw new Error(reply.text.trim());
+      return { ref: uriOf(id), text: reply.text };
     },
     async list() {
       const reply = await call("list", { uri: folder });

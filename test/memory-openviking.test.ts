@@ -33,7 +33,7 @@ describe("finding the OpenViking server", () => {
 
 describe("the OpenViking store", () => {
   it("writes an item as a resource file of the project and answers with its address", async () => {
-    const { calls, store } = server({ write: { isError: false, text: `Wrote 12 bytes to ${base}gk-1.md (mode=replace).` } });
+    const { calls, store } = server({ write: { isError: false, text: JSON.stringify({ result: `Wrote 12 bytes to ${base}gk-1.md (mode=create).\nIndexing: semantic=queued, vector=queued.` }) } });
     expect(await store.put("gk-1", "# Title\n")).toBe(`${base}gk-1.md`);
     expect(calls).toEqual([{ tool: "write", args: { uri: `${base}gk-1.md`, content: "# Title\n", mode: "replace" } }]);
   });
@@ -44,7 +44,7 @@ describe("the OpenViking store", () => {
   });
 
   it("counts removing an item that is already gone as done, and fails on other errors", async () => {
-    const gone = server({ forget: { isError: true, text: `Error executing tool forget: File not found: ${base}gk-1.md` } });
+    const gone = server({ forget: { isError: false, text: JSON.stringify({ result: `Deleted: ${base}gk-1.md` }) } });
     await expect(gone.store.remove(`${base}gk-1.md`)).resolves.toBeUndefined();
     expect(gone.calls[0]).toEqual({ tool: "forget", args: { uri: `${base}gk-1.md` } });
     const broken = server({ forget: { isError: true, text: "Error executing tool forget: storage offline" } });
@@ -54,22 +54,24 @@ describe("the OpenViking store", () => {
   it("reads an item back, and takes the server's not-found answer for no item", async () => {
     const present = server({ read: { isError: false, text: "# Title\n\nProject: x · Archivist gk-1 · updated 2026-10-23T10:00:00.000Z\n" } });
     expect(await present.store.fetch!("gk-1")).toEqual({ ref: `${base}gk-1.md`, text: "# Title\n\nProject: x · Archivist gk-1 · updated 2026-10-23T10:00:00.000Z\n" });
-    expect(present.calls[0]).toEqual({ tool: "read", args: { uris: `${base}gk-1.md` } });
+    expect(present.calls[0]).toEqual({ tool: "read", args: { uris: [`${base}gk-1.md`] } });
     const absent = server({ read: { isError: false, text: `File not found: ${base}gk-1.md` } });
     expect(await absent.store.fetch!("gk-1")).toBeUndefined();
   });
 
-  it("lists the project's item files and nothing else", async () => {
-    const { calls, store } = server({ list: { isError: false, text: "[file] gk-1.md\n[file] cmd-2.md\n[dir] drafts\n[file] .abstract.md\n[file] notes.txt" } });
+  it("lists the project's item files and nothing else, from the answer wrapped as the server sends it", async () => {
+    const listing = "[file] gk-1.md\n[file] cmd-2.md\n[dir] drafts\n[file] .abstract.md\n[file] notes.txt";
+    const { calls, store } = server({ list: { isError: false, text: JSON.stringify({ result: listing }) } });
     expect(await store.list!()).toEqual([
       { id: "gk-1", ref: `${base}gk-1.md` },
       { id: "cmd-2", ref: `${base}cmd-2.md` },
     ]);
     expect(calls[0]).toEqual({ tool: "list", args: { uri: base } });
+    expect(await server({ list: { isError: false, text: listing } }).store.list!()).toHaveLength(2);
   });
 
   it("lists nothing for a project with no folder yet", async () => {
-    expect(await server({ list: { isError: false, text: `(no entries under ${base})` } }).store.list!()).toEqual([]);
+    expect(await server({ list: { isError: false, text: JSON.stringify({ result: `(no entries under ${base})` }) } }).store.list!()).toEqual([]);
     expect(await server({ list: { isError: true, text: `Error executing tool list: Directory not found: ${base}` } }).store.list!()).toEqual([]);
   });
 });

@@ -18,9 +18,18 @@ export const findOpenVikingServer = (tools: { name: string; serverName: string }
 
 const isNotFound = (text: string): boolean => /not found: viking:\/\//i.test(text) && !text.trim().includes("\n");
 
+const unwrapped = (text: string): string => {
+  try {
+    const value = JSON.parse(text) as { result?: unknown } | null;
+    return typeof value?.result === "string" ? value.result : text;
+  } catch {
+    return text;
+  }
+};
+
 const textOrThrow = (reply: McpReply): string => {
   if (reply.isError) throw new Error(reply.text.trim());
-  return reply.text;
+  return unwrapped(reply.text);
 };
 
 export const openVikingStore = (call: McpCall, project: string): MemoryStore => {
@@ -37,9 +46,10 @@ export const openVikingStore = (call: McpCall, project: string): MemoryStore => 
       if (reply.isError && !isNotFound(reply.text)) throw new Error(reply.text.trim());
     },
     async fetch(id) {
-      const reply = await call("read", { uris: uriOf(id) });
+      const reply = await call("read", { uris: [uriOf(id)] });
       if (isNotFound(reply.text)) return undefined;
-      return { ref: uriOf(id), text: textOrThrow(reply) };
+      if (reply.isError) throw new Error(reply.text.trim());
+      return { ref: uriOf(id), text: reply.text };
     },
     async list() {
       const reply = await call("list", { uri: folder });
