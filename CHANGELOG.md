@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.5 — 2026-10-23
+
+- Fix: writes under `.archivist/` could be lost. The mod of each session and the CLI (the triage skill's `apply`/`skip`) are separate processes, and every write is read-modify-write. Writers now take a lock (`.archivist/.local/lock`, a directory, aged out after 2 minutes if its writer died). The analysis holds it only around its writes, never over a model call, and validates against the base as it is then: a fact recorded meanwhile becomes a reinforce, and ADR numbers stay unique.
+- Fix: a task that ended while another analysis ran was kept open, so the next task was journalled into it. The task now closes on time and waits for its analysis.
+- Fix: a task whose analysis threw was retried at every session start, forever. It is given up after three failures, and a retry does not write twice what the failed run already wrote.
+
 ## 1.3.4 — 2026-10-22
 
 - Entries tied to the task at hand are kept out: the curator is told not to carry ticket numbers, branches of the current work or epics, but the rule that outlives the task; `/archivist:triage` applies only that lasting part (and offers decisions in that form).

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { PATHS, withLocalIgnored, type Io } from "../core/io.js";
 
@@ -33,6 +33,29 @@ const rawNodeIo = (root: string): Io => ({
   },
   async removeEmptyDir(p) {
     await rmdir(join(root, p)).catch(() => undefined);
+  },
+  mutex: {
+    async claim(p) {
+      await mkdir(dirname(join(root, p)), { recursive: true });
+      try {
+        await mkdir(join(root, p));
+        return true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw err;
+      }
+    },
+    async age(p) {
+      try {
+        return Date.now() - (await stat(join(root, p))).mtimeMs;
+      } catch {
+        return undefined;
+      }
+    },
+    async release(p) {
+      await rmdir(join(root, p)).catch(() => undefined);
+    },
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   },
 });
 

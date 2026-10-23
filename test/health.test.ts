@@ -60,10 +60,10 @@ describe("analysis journal", () => {
       },
     };
     await analyzeSegment({ io, llm, config: config(), segment: segment([{ tool: "Read", target: "a", ok: true }]), now });
-    await analyzeSegment({ io, llm, config: config(), segment: segment([{ tool: "Edit", target: "src/a.ts", ok: true }]), now });
+    await analyzeSegment({ io, llm, config: config(), segment: { ...segment([{ tool: "Edit", target: "src/a.ts", ok: true }]), id: "seg2" }, now });
     expect(await loadAnalyses(io)).toEqual([
-      { ts: now.toISOString(), outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 },
-      { ts: now.toISOString(), outcome: "done", applied: 1, proposals: 0, dropped: 0, tokens: 2300 },
+      { ts: now.toISOString(), segment: "seg1", outcome: "skipped", applied: 0, proposals: 0, dropped: 0, tokens: 0 },
+      { ts: now.toISOString(), segment: "seg2", outcome: "done", applied: 1, proposals: 0, dropped: 0, tokens: 2300 },
     ]);
   });
 });

@@ -142,6 +142,28 @@ var nextAdr = (entries) => {
 };
 var activeEntries = (entries) => [...entries.values()].filter((e) => e.status === "active");
 
+// src/core/lock.ts
+var LOCK = ".archivist/.local/lock";
+var STALE_MS = 2 * 6e4;
+var WAIT_MS = 3e4;
+var POLL_MS = 100;
+var withLock = async (io, fn, waitMs = WAIT_MS) => {
+  const m = io.mutex;
+  if (!m) return fn();
+  for (let waited = 0; !await m.claim(LOCK); waited += POLL_MS) {
+    const age = await m.age(LOCK);
+    if (age !== void 0 && age > STALE_MS) await m.release(LOCK);
+    else if (waited >= waitMs)
+      throw new Error(`${LOCK} is held by another Archivist writer${age === void 0 ? "" : ` (for ${Math.round(age / 1e3)} s)`}; if none is running, remove that directory`);
+    await m.sleep(POLL_MS);
+  }
+  try {
+    return await fn();
+  } finally {
+    await m.release(LOCK);
+  }
+};
+
 // src/core/text.ts
 var normalize = (s) => s.toLowerCase().replace(/[`*_~"'«»“”()[\]{}<>]/g, " ").replace(/[^\p{L}\p{N}./:@+-]+/gu, " ").trim();
 var tokens = (s) => normalize(s).split(/\s+/).filter((t) => t.length > 1);
@@ -792,37 +814,46 @@ var record = async (io, config, ops, now2, src) => {
   await renderAll(io, (await loadState(io)).entries, config);
   return [...v.applied, ...v.rejected];
 };
-var applyProposals = async (io, config, chosen, now2) => {
+var stillWaiting = async (io, chosen) => {
+  const out = [];
+  for (const p of chosen) if (await io.exists(p.path)) out.push(p);
+  return out;
+};
+var applyProposals = async (io, config, chosen, now2) => withLock(io, async () => {
   const outcomes = [];
-  for (const p of chosen) {
+  for (const p of await stillWaiting(io, chosen)) {
     outcomes.push(...await record(io, config, [{ ...p.op, confidence: 1 }], now2, p.src));
     await io.remove?.(p.path);
   }
   return outcomes;
-};
-var skipProposals = async (io, chosen, now2) => {
+});
+var skipProposals = async (io, chosen, now2) => withLock(io, async () => {
+  const waiting = await stillWaiting(io, chosen);
   const prev = await io.read(SKIPPED) ?? "";
-  const lines = chosen.map((p) => JSON.stringify({ ts: now2, text: p.op.op === "add" ? `${p.op.title} ${p.op.content}` : describeOp(p.op) }));
+  const lines = waiting.map((p) => JSON.stringify({ ts: now2, text: p.op.op === "add" ? `${p.op.title} ${p.op.content}` : describeOp(p.op) }));
   if (lines.length) await io.write(SKIPPED, prev + lines.join("\n") + "\n");
-  for (const p of chosen) await io.remove?.(p.path);
-  return chosen.length;
-};
-var addEntry = async (io, config, fields, now2) => record(
+  for (const p of waiting) await io.remove?.(p.path);
+  return waiting.length;
+});
+var addEntry = async (io, config, fields, now2) => withLock(
   io,
-  config,
-  [
-    {
-      op: "add",
-      type: fields.type,
-      title: fields.title,
-      content: fields.content,
-      ...fields.rationale ? { rationale: fields.rationale } : {},
-      ...fields.paths?.length ? { scope: { paths: fields.paths } } : {},
-      ...fields.evidence?.length ? { evidence: fields.evidence.map((file) => ({ file })) } : {},
-      confidence: 1
-    }
-  ],
-  now2
+  () => record(
+    io,
+    config,
+    [
+      {
+        op: "add",
+        type: fields.type,
+        title: fields.title,
+        content: fields.content,
+        ...fields.rationale ? { rationale: fields.rationale } : {},
+        ...fields.paths?.length ? { scope: { paths: fields.paths } } : {},
+        ...fields.evidence?.length ? { evidence: fields.evidence.map((file) => ({ file })) } : {},
+        confidence: 1
+      }
+    ],
+    now2
+  )
 );
 var editFromOptions = (o) => ({
   ...o.title ? { title: o.title } : {},
@@ -834,7 +865,7 @@ var activeEntry = async (io, id) => {
   const e = (await loadState(io)).entries.get(id);
   return e && e.status === "active" ? e : void 0;
 };
-var editEntry = async (io, config, id, edit, now2) => {
+var editEntry = async (io, config, id, edit, now2) => withLock(io, async () => {
   const e = await activeEntry(io, id);
   if (!e) return { ok: false, reason: `no active entry ${id}` };
   const max = e.type === "procedure" ? 1500 : config.budgets.maxContentChars;
@@ -849,8 +880,8 @@ var editEntry = async (io, config, id, edit, now2) => {
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
   return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
-};
-var deprecateEntry = async (io, config, id, reason, now2) => {
+});
+var deprecateEntry = async (io, config, id, reason, now2) => withLock(io, async () => {
   const e = await activeEntry(io, id);
   if (!e) return { ok: false, reason: `no active entry ${id}` };
   if (!reason.trim()) return { ok: false, reason: "say why: --reason" };
@@ -858,7 +889,7 @@ var deprecateEntry = async (io, config, id, reason, now2) => {
   const after = await loadState(io);
   const r = await renderAll(io, after.entries, config);
   return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
-};
+});
 
 // src/analyzer/signals.ts
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -1139,7 +1170,7 @@ var healthText = async (io, entries, config, now2, extras = {}) => {
 
 // src/cli/node-io.ts
 import { existsSync } from "node:fs";
-import { mkdir, readdir as readdir2, readFile as readFile2, rm, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir as readdir2, readFile as readFile2, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join as join2, resolve } from "node:path";
 var nodeIo = (root) => withLocalIgnored(rawNodeIo(root));
 var rawNodeIo = (root) => ({
@@ -1170,6 +1201,29 @@ var rawNodeIo = (root) => ({
   },
   async removeEmptyDir(p) {
     await rmdir(join2(root, p)).catch(() => void 0);
+  },
+  mutex: {
+    async claim(p) {
+      await mkdir(dirname(join2(root, p)), { recursive: true });
+      try {
+        await mkdir(join2(root, p));
+        return true;
+      } catch (err) {
+        if (err.code === "EEXIST") return false;
+        throw err;
+      }
+    },
+    async age(p) {
+      try {
+        return Date.now() - (await stat(join2(root, p))).mtimeMs;
+      } catch {
+        return void 0;
+      }
+    },
+    async release(p) {
+      await rmdir(join2(root, p)).catch(() => void 0);
+    },
+    sleep: (ms) => new Promise((resolve2) => setTimeout(resolve2, ms))
   }
 });
 var findRoot = (start) => {
@@ -1346,7 +1400,7 @@ var printRender = (r) => {
   for (const w of r.written) console.log(`  wrote ${w}`);
   for (const w of r.removed) console.log(`  removed ${w}`);
 };
-var init = async (io) => {
+var init = async (io) => withLock(io, async () => {
   if (!await io.exists(PATHS.config)) await io.write(PATHS.config, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
   if (!await io.exists(PATHS.gitignore)) await io.write(PATHS.gitignore, ".local/\n");
   const config = await loadConfig(io);
@@ -1358,7 +1412,7 @@ var init = async (io) => {
   if (!v.applied.length) console.log("  no new commands found to record");
   printRender(await renderAll(io, (await loadState(io)).entries, config));
   console.log("Commit .archivist/ and .claude/rules/archivist/ to share the knowledge with your team.");
-};
+});
 var status = async (io) => {
   const state = await loadState(io);
   const active = activeEntries(state.entries);
@@ -1450,9 +1504,14 @@ var gc = async (io, args) => {
     console.log(`${quiet.length} entries unused for ${days} days. Run with --apply to retire them (they stay in the ledger).`);
     return;
   }
-  await appendLedger(io, gcRecords(quiet, days, now()));
-  printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
-  console.log(`retired ${quiet.length} entries`);
+  const retired = await withLock(io, async () => {
+    const entries = (await loadState(io)).entries;
+    const still = quiet.filter((e) => entries.get(e.id)?.status === "active");
+    await appendLedger(io, gcRecords(still, days, now()));
+    printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
+    return still.length;
+  });
+  console.log(`retired ${retired} entries`);
 };
 var claudeVersion = () => {
   try {
@@ -1532,7 +1591,7 @@ var main = async () => {
     case "deprecate":
       return change(io, cmd, rest);
     case "render":
-      printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
+      printRender(await withLock(io, async () => renderAll(io, (await loadState(io)).entries, await loadConfig(io))));
       return 0;
     case "recall":
       console.log(recallText((await loadState(io)).entries, rest.join(" ")));
