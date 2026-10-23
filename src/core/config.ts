@@ -22,6 +22,12 @@ export interface Config {
     maxTokensPerDay: number;
     /** Skip analysis while a rate-limit window is fuller than this. */
     maxRateLimitPercent: number;
+    /**
+     * Analyse while a subscription window (five_hour, seven_day) is full: the analysis then runs on the account's usage
+     * credits, and fails without them. Off by default, so Archivist never spends money unasked. A gateway's spend limit
+     * always holds.
+     */
+    useCredits: boolean;
   };
   apply: {
     autoConfidence: number;
@@ -78,6 +84,7 @@ export const DEFAULT_CONFIG: Config = {
     curateModel: "haiku",
     maxTokensPerDay: 3_000_000,
     maxRateLimitPercent: 90,
+    useCredits: false,
   },
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6000, pathFileLines: 40, pathFileChars: 3000, maxContentChars: 400 },

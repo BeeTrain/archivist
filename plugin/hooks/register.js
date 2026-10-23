@@ -49,7 +49,8 @@ var DEFAULT_CONFIG = {
     forkMaxContextTokens: 3e5,
     curateModel: "haiku",
     maxTokensPerDay: 3e6,
-    maxRateLimitPercent: 90
+    maxRateLimitPercent: 90,
+    useCredits: false
   },
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
@@ -1695,6 +1696,32 @@ var afterFailure = (failures = 0) => ({
   drop: failures + 1 >= MAX_FAILURES
 });
 
+// src/core/hold.ts
+var CREDIT_WINDOWS = /* @__PURE__ */ new Set(["five_hour", "seven_day"]);
+var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+var pad = (n) => String(n).padStart(2, "0");
+var clockText = (d) => `${MONTHS[d.getMonth()]} ${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+var statusText = (until, why, hint) => `\u{1F4DA} analysis waits${until ? ` till ${clockText(until)}` : ""} (${why})${hint ? ` \xB7 ${hint}` : ""}`;
+var holdOf = (spent, limits, analyzer, now) => {
+  if (spent >= analyzer.maxTokensPerDay) {
+    const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+    return {
+      reason: `daily budget used (${spent}/${analyzer.maxTokensPerDay})`,
+      status: statusText(midnight, "daily budget used", "raise analyzer.maxTokensPerDay")
+    };
+  }
+  const full = limits.filter((l) => l.percentUsed >= analyzer.maxRateLimitPercent).filter((l) => !(analyzer.useCredits && CREDIT_WINDOWS.has(l.kind)));
+  if (!full.length) return void 0;
+  const resets = full.map((l) => l.resetsAt ? Date.parse(l.resetsAt) : NaN);
+  const until = resets.some(Number.isNaN) ? void 0 : new Date(Math.max(...resets));
+  const why = full.map((l) => `${l.kind} limit at ${l.percentUsed}%`).join(", ");
+  const onCredits = full.every((l) => CREDIT_WINDOWS.has(l.kind));
+  return {
+    reason: full.map((l) => `${l.kind} rate limit at ${l.percentUsed}%`).join(", "),
+    status: statusText(until, why, onCredits ? "analyzer.useCredits runs it on credits" : void 0)
+  };
+};
+
 // src/adapters/claude/mod/register.ts
 var SEG_KEY = "archivist:seg:";
 var BUDGET_KEY = "archivist:budget:";
@@ -1927,11 +1954,10 @@ async function analyse($, stored, current) {
     const spentKey = BUDGET_KEY + today();
     const spent = await $.store.get(spentKey) ?? 0;
     const usage = await $.session.usage();
-    const limits = usage.rateLimits ?? [];
-    const held = spent >= config.analyzer.maxTokensPerDay ? `daily budget used (${spent}/${config.analyzer.maxTokensPerDay})` : limits.filter((l) => l.percentUsed >= config.analyzer.maxRateLimitPercent).map((l) => `${l.kind} rate limit at ${l.percentUsed}%`).join(", ");
+    const held = holdOf(spent, usage.rateLimits ?? [], config.analyzer, /* @__PURE__ */ new Date());
     if (held) {
-      await log($, stored.root, `seg ${s.id}: postponed: ${held}`);
-      showStatus($, `\u{1F4DA} analysis postponed: ${held}`, "event");
+      await log($, stored.root, `seg ${s.id}: postponed: ${held.reason}`);
+      showStatus($, held.status, "event");
       $.clock.after(RETRY_MS, async () => analyse($, stored, current));
       return;
     }

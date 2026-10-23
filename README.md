@@ -134,6 +134,7 @@ claude --plugin-dir ./plugin
 | `analyzer.curateModel` | `"haiku"` | модель для курирования |
 | `analyzer.maxTokensPerDay` | `3000000` | дневной бюджет анализа во взвешенных токенах (чтение из кэша считается как 0.1) |
 | `analyzer.maxRateLimitPercent` | `90` | не анализировать, если окно лимита заполнено сильнее |
+| `analyzer.useCredits` | `false` | анализировать и при заполненном окне подписки (`five_hour`, `seven_day`): анализ тогда идёт за счёт usage credits, а без них падает. Лимит трат шлюза (`spend_limit`) держит всегда |
 | `apply.autoConfidence` | `0.8` | порог уверенности для применения без ревью |
 | `apply.autoTypes` | `command, gotcha, decision` | какие типы можно применять без ревью |
 | `budgets.coreLines` / `budgets.coreChars` | `60` / `6000` | лимит `core.md`: сверх него записи с худшей историей использования уходят в `INDEX.md` (доступны через `recall`) |

@@ -22,6 +22,7 @@ import { truncate } from '../../../core/text.js'
 import { addUsage, emptyUsage, weightedTokens, type Message, type Segment, type ToolEvent, type Usage } from '../../../core/types.js'
 import { analyzeSegment } from '../../../analyzer/pipeline.js'
 import { afterFailure, MAX_FAILURES } from '../../../core/attempts.js'
+import { holdOf, type RateLimit } from '../../../core/hold.js'
 import { noticeText, statusLine } from '../../../analyzer/report.js'
 
 const SEG_KEY = 'archivist:seg:'
@@ -303,17 +304,10 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
     const spentKey = BUDGET_KEY + today()
     const spent = ((await $.store.get(spentKey)) as number | undefined) ?? 0
     const usage = await $.session.usage()
-    const limits = (usage.rateLimits ?? []) as { kind: string; percentUsed: number }[]
-    const held =
-      spent >= config.analyzer.maxTokensPerDay
-        ? `daily budget used (${spent}/${config.analyzer.maxTokensPerDay})`
-        : limits
-            .filter((l) => l.percentUsed >= config.analyzer.maxRateLimitPercent)
-            .map((l) => `${l.kind} rate limit at ${l.percentUsed}%`)
-            .join(', ')
+    const held = holdOf(spent, (usage.rateLimits ?? []) as RateLimit[], config.analyzer, new Date())
     if (held) {
-      await log($, stored.root, `seg ${s.id}: postponed: ${held}`)
-      showStatus($, `📚 analysis postponed: ${held}`, 'event')
+      await log($, stored.root, `seg ${s.id}: postponed: ${held.reason}`)
+      showStatus($, held.status, 'event')
       $.clock.after(RETRY_MS, async () => analyse($, stored, current))
       return
     }
