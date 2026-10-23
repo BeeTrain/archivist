@@ -13,7 +13,9 @@ import { activeEntries, loadState } from '../../../core/ledger.js'
 import { isExcluded, redact } from '../../../core/privacy.js'
 import { applyProposals, deprecateEntry, describeOp, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
 import { parseOptions, splitArgs } from '../../../core/args.js'
-import { healthText, recallText, statsText } from '../../../core/maintenance.js'
+import { healthText, memoryLines, recallText, statsText } from '../../../core/maintenance.js'
+import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryUpToDate, projectId, syncMemory, type MemoryStore } from '../../../core/memory.js'
+import { findOpenVikingServer, openVikingStore, type McpCall } from '../../../core/memory-openviking.js'
 import { logKey, withLine } from '../../../core/log.js'
 import { countsText, shouldRecount, type StatusKind } from '../../../core/status.js'
 import { truncate } from '../../../core/text.js'
@@ -29,6 +31,8 @@ const LAST_KEY = 'archivist:last:'
 const RETRY_MS = 15 * 60_000
 const BUSY_RETRY_MS = 60_000
 const FORK_TIMEOUT_MS = 120_000
+const MEMORY_CHECK_AFTER_START_MS = 5_000
+const NO_MEMORY = 'No supported memory plugin is connected to this session (Archivist supports OpenViking).'
 
 interface StoredSegment {
   root: string
@@ -78,6 +82,8 @@ let ownTurnPending = false
 let lastStatus: string | undefined
 let statusKind: StatusKind | undefined
 const ownTurns = new Set<string>()
+let memoryBusy = false
+let memoryAgain: 'fast' | 'verify' | undefined
 
 const newSegment = (): Segment => ({
   id: Date.now().toString(36),
@@ -194,6 +200,82 @@ async function refreshStatus($: any, io: Io): Promise<void> {
   showStatus($, countsText(n, queued), 'counts')
 }
 
+function mcpCaller($: any, server: string): McpCall {
+  return async (tool, args) => {
+    const reply = await $.mcp.call(server, tool, args)
+    const blocks = (reply.content ?? []) as { type: string; text?: string }[]
+    return { text: blocks.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n'), isError: Boolean(reply.isError) }
+  }
+}
+
+async function memoryServer($: any, config: Config): Promise<string | undefined> {
+  if (config.memory.server !== 'auto') return config.memory.server
+  const usage = await $.session.usage({ breakdown: 'summary' })
+  return findOpenVikingServer((usage.context?.breakdown?.mcpTools ?? []) as { name: string; serverName: string }[])
+}
+
+async function gitRemote($: any, base: string): Promise<string | undefined> {
+  const run = await $.process.run(['git', '-C', base, 'remote', 'get-url', 'origin'])
+  return run.exitCode === 0 ? String(run.stdout ?? '').trim() || undefined : undefined
+}
+
+async function memoryTarget($: any, base: string, config: Config): Promise<{ server: string; project: string; store: MemoryStore } | undefined> {
+  const server = await memoryServer($, config)
+  if (!server) return undefined
+  const project = config.memory.project !== 'auto' ? config.memory.project : projectId(await gitRemote($, base), base)
+  return { server, project, store: openVikingStore(mcpCaller($, server), project) }
+}
+
+async function syncToMemory($: any, base: string, mode: 'fast' | 'verify'): Promise<void> {
+  if (memoryBusy) {
+    memoryAgain = mode === 'verify' || memoryAgain === 'verify' ? 'verify' : 'fast'
+    return
+  }
+  memoryBusy = true
+  try {
+    const io = makeIo($, base)
+    const config = await loadConfig(io)
+    if (!config.enabled || !config.memory.enabled) return
+    if (mode === 'fast' && (await memoryUpToDate(io))) return
+    const target = await memoryTarget($, base, config)
+    if (!target) return
+    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: new Date().toISOString() })
+    if (outcome) await log($, base, `memory ${mode} (${target.server}, ${target.project}): ${memoryOutcomeText(outcome)}`)
+  } catch (err) {
+    await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    memoryBusy = false
+    const again = memoryAgain
+    memoryAgain = undefined
+    if (again) await syncToMemory($, base, again)
+  }
+}
+
+function syncToMemoryLater($: any, base: string, mode: 'fast' | 'verify', delayMs = 0): void {
+  $.clock.after(delayMs, async () => syncToMemory($, base, mode))
+}
+
+async function memoryCommand($: any, io: Io, config: Config, action: string): Promise<string> {
+  const target = await memoryTarget($, root, config)
+  const where = target ? `${target.server}, project ${target.project}` : ''
+  const syncOn = config.enabled && config.memory.enabled
+  if (action === 'sync') {
+    if (!syncOn) return 'Memory sync is off: set memory.enabled to true in .archivist/config.json.'
+    if (!target) return NO_MEMORY
+    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: 'verify', now: new Date().toISOString() })
+    return `Synced with ${where}: ${outcome ? memoryOutcomeText(outcome) : 'nothing to do'}.`
+  }
+  if (action === 'clear') {
+    if (!target) return NO_MEMORY
+    const removed = await clearMemory(io, target.store, target.project)
+    return [
+      `Removed ${removed.length} Archivist items from ${where}.`,
+      ...(syncOn ? ['Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out.'] : []),
+    ].join(' ')
+  }
+  return [target ? `Memory: ${where}${syncOn ? '' : ' (sync is off: memory.enabled)'}` : NO_MEMORY, ...memoryLines(await loadMemoryCaches(io))].join('\n')
+}
+
 /** Runs the pipeline over one finished task. `current` = it belongs to this live session (messages and fork available). */
 async function analyse($: any, stored: StoredSegment, current: boolean): Promise<void> {
   const s = stored.seg
@@ -266,6 +348,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
     notice = noticeText(result.report)
     showStatus($, statusLine(result.report), 'result')
     $.ui.toast(statusLine(result.report), { timeoutMs: config.report.toastMs })
+    syncToMemoryLater($, stored.root, 'fast')
     if (config.report.mode === 'rewake' && current) {
       ownTurnPending = true
       await $.prompt.submit({
@@ -297,7 +380,7 @@ export function register(on: On): void {
     await $.command.register({
       name: 'archivist',
       description: 'Archivist: what it learned from the last task (report) or the knowledge base status (status)',
-      argumentHint: '[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> …|deprecate <id> --reason …|log]',
+      argumentHint: '[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> …|deprecate <id> --reason …|memory [status|sync|clear]|log]',
     })
 
     // Tasks waiting for analysis: this session's (a module reload dropped their timer; the open one is closed
@@ -321,6 +404,7 @@ export function register(on: On): void {
       })
     }
     await refreshStatus($, makeIo($, root))
+    syncToMemoryLater($, root, 'verify', MEMORY_CHECK_AFTER_START_MS)
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -401,6 +485,7 @@ export function register(on: On): void {
     // recount. An event (analysing, postponed, failed) stays until the next analysis replaces it.
     if (root && shouldRecount(statusKind)) await refreshStatus($, makeIo($, root))
     else if (lastStatus) $.ui.status(lastStatus)
+    if (root) syncToMemoryLater($, root, 'fast')
     if (!notice) return r
     // r.text is the answer itself: replace it with the notice, never append to it, or the answer is shown twice.
     const text = notice
@@ -426,8 +511,10 @@ export function register(on: On): void {
           ? await deprecateEntry(io, cfg, id, opts.reason ?? '', now)
           : await editEntry(io, cfg, id, editFromOptions(opts), now)
       await refreshStatus($, io)
+      syncToMemoryLater($, root, 'fast')
       return { text: r.ok ? `${verb === 'edit' ? 'Updated' : 'Retired'} \`${r.entry.id}\`: ${r.entry.title}` : `Not changed: ${r.reason}` }
     }
+    if (verb === 'memory') return { text: await memoryCommand($, io, cfg, rest[0] ?? 'status') }
     if (verb === 'stats') return { text: await statsText(io, (await loadState(io)).entries) }
     if (verb === 'health')
       return {
@@ -448,6 +535,7 @@ export function register(on: On): void {
       }
       const outcomes = await applyProposals(io, cfg, chosen, now)
       await refreshStatus($, io)
+      syncToMemoryLater($, root, 'fast')
       return { text: ['Recorded:', ...outcomes.map((o) => `- ${o.title ?? ''}${o.id ? ` \`${o.id}\`` : ''}${o.reason ? ` (${o.reason})` : ''}`)].join('\n') }
     }
     if (verb === 'status') {

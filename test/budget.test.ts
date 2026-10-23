@@ -6,7 +6,7 @@ import { entry } from "./helpers.js";
 const cfg = (over: Partial<Config["budgets"]> = {}, decisions: "compact" | "full" = "compact"): Config => ({
   ...DEFAULT_CONFIG,
   budgets: { ...DEFAULT_CONFIG.budgets, ...over },
-  rules: { decisions },
+  rules: { ...DEFAULT_CONFIG.rules, decisions },
 });
 
 const decision = entry({

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 — 2026-10-23
+
+- External memory: when a long-term memory plugin is connected to the session (OpenViking for now), Archivist keeps its entries there too, so other agents and plugins see them. The ledger stays the source of truth and memory is a projection of it: new and changed entries are written, retired ones removed. Each item is plain text an agent reads without Archivist, signed with the project (from `git remote`), the entry id and when it last changed.
+- Copies of a project share one place in memory (clones, worktrees, branches, a team on one server): a newer version is never overwritten, a vanished item is not brought back, only entries this ledger retired are removed, and items it does not know are left alone. What a copy sent is cached in `.archivist/.local/memory-<store>.json`; memory itself is checked at session start and on a copy's first sync.
+- Memory is reached through the connected plugin's MCP server, with its connection and keys. `memory.enabled`, `memory.server` and `memory.project` tune it; `rules.files: false` leaves out the rule files and skills, so the knowledge goes to memory only.
+- `/archivist memory [status|sync|clear]`, and a Memory section in `/archivist health`. Turning sync off or `archivist uninstall` removes nothing from memory, where deletion is final: `/archivist memory clear` does it on request.
+- `docs/memory.md`: the principle for any memory system, the item format, and how OpenViking, mem0, file and graph memories map to it.
+
 ## 1.3.5 — 2026-10-23
 
 - Fix: writes under `.archivist/` could be lost. The mod of each session and the CLI (the triage skill's `apply`/`skip`) are separate processes, and every write is read-modify-write. Writers now take a lock (`.archivist/.local/lock`, a directory, aged out after 2 minutes if its writer died). The analysis holds it only around its writes, never over a model call, and validates against the base as it is then: a fact recorded meanwhile becomes a reinforce, and ADR numbers stay unique.
