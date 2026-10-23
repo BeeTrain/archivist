@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.6 — 2026-10-23
+
+- A postponed analysis says when it will run: the status line reads `📚 analysis waits till Oct 25 11:00 (seven_day limit at 100%)`, the latest reset of the full windows in local time (the next UTC day for the daily budget), and how to go ahead anyway.
+- `analyzer.useCredits` (off by default): analyse while a subscription window (`five_hour`, `seven_day`) is full, on the account's usage credits. The session does not tell whether credits are on, so Archivist kept waiting after they were bought; it never spends them unasked. A gateway's spend limit always holds.
+
 ## 1.3.5 — 2026-10-23
 
 - Fix: writes under `.archivist/` could be lost. The mod of each session and the CLI (the triage skill's `apply`/`skip`) are separate processes, and every write is read-modify-write. Writers now take a lock (`.archivist/.local/lock`, a directory, aged out after 2 minutes if its writer died). The analysis holds it only around its writes, never over a model call, and validates against the base as it is then: a fact recorded meanwhile becomes a reinforce, and ADR numbers stay unique.

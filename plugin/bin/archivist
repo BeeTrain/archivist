@@ -54,7 +54,8 @@ var DEFAULT_CONFIG = {
     forkMaxContextTokens: 3e5,
     curateModel: "haiku",
     maxTokensPerDay: 3e6,
-    maxRateLimitPercent: 90
+    maxRateLimitPercent: 90,
+    useCredits: false
   },
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
