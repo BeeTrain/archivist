@@ -11,15 +11,11 @@ export interface Io {
   remove?(path: string): Promise<void>;
   /** Removes a directory only if it is empty; a no-op otherwise, so nothing someone else put there goes. */
   removeEmptyDir?(path: string): Promise<void>;
-  /** What the write lock is made of (core/lock.ts). Without it (tests in memory) writes run unlocked. */
   mutex?: Mutex;
 }
 
-/** Atomic primitives across processes: the mod of each session and the CLI write the same files. */
 export interface Mutex {
-  /** Creates the directory, and its parents, only if it is absent: true when this call created it. */
   claim(path: string): Promise<boolean>;
-  /** Milliseconds since the directory was created; undefined when it is absent. */
   age(path: string): Promise<number | undefined>;
   release(path: string): Promise<void>;
   sleep(ms: number): Promise<void>;

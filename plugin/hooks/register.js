@@ -54,7 +54,8 @@ var DEFAULT_CONFIG = {
   },
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
-  rules: { decisions: "compact" },
+  rules: { decisions: "compact", files: true },
+  memory: { enabled: true, server: "auto", project: "auto" },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15e3 },
   review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 }
@@ -568,11 +569,13 @@ var renderSkill = (e) => {
 var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}) => {
   const all = [...entries.values()];
   const views = /* @__PURE__ */ new Map();
-  views.set(PATHS.coreRule, renderCore(all, config, stale, usage));
-  for (const [path, text] of renderAreas(all, config, stale, usage)) views.set(path, text);
+  if (config.rules.files) {
+    views.set(PATHS.coreRule, renderCore(all, config, stale, usage));
+    for (const [path, text] of renderAreas(all, config, stale, usage)) views.set(path, text);
+    for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
+  }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
-  for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
   return views;
 };
 var findStale = async (io, entries) => {
@@ -937,6 +940,163 @@ var expireProposals = async (io, config, now) => {
   return gone;
 };
 
+// src/core/memory.ts
+var segment = (s) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+var localProject = (path) => `local/${segment(path.replace(/\.git$/, "").split("/").filter(Boolean).at(-1) ?? "project") || "project"}`;
+var hostAndPath = (remote) => {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) {
+    const url = new URL(remote);
+    return url.hostname ? [url.hostname, url.pathname] : void 0;
+  }
+  const scp = remote.match(/^(?:[^@/]+@)?([^:/]+):(.+)$/);
+  return scp ? [scp[1], scp[2]] : void 0;
+};
+var projectId = (remote, root2) => {
+  const url = remote?.trim();
+  const parts = url ? hostAndPath(url) : void 0;
+  if (!parts) return localProject(url || root2);
+  const [host, path] = parts;
+  return [host, ...path.replace(/\.git$/, "").split("/")].map(segment).filter(Boolean).join("/");
+};
+var TYPE_LABEL = { command: "Command", gotcha: "Gotcha", decision: "Decision", procedure: "Procedure" };
+var signatureLine = (e, project) => [`Project: ${project}`, `Archivist ${e.id}`, ...e.adr ? [`ADR-${String(e.adr).padStart(4, "0")}`] : [], `updated ${e.updated}`].join(" \xB7 ");
+var renderItem = (e, project) => {
+  const label = TYPE_LABEL[e.type];
+  return [
+    `# ${e.title}`,
+    "",
+    e.content.includes("\n") ? `${label}:
+${e.content}` : `${label}: ${e.content}`,
+    ...e.rationale ? [`Why: ${e.rationale}`] : [],
+    ...e.scope?.paths.length ? [`Where: ${e.scope.paths.join(", ")}`] : [],
+    "",
+    signatureLine(e, project),
+    ""
+  ].join("\n");
+};
+var SIGNATURE = /^Project: (.+?) · Archivist (\S+)(?: · ADR-\d+)? · updated (\S+)$/;
+var readSignature = (text) => {
+  const match = (text.trimEnd().split("\n").at(-1) ?? "").match(SIGNATURE);
+  return match ? { project: match[1], id: match[2], updated: match[3] } : void 0;
+};
+var noOutcome = () => ({ written: [], adopted: [], removed: [], newer: [], missing: [], unknown: [], failed: [] });
+var messageOf = (err) => err instanceof Error ? err.message : String(err);
+var reconcile = async (args) => {
+  const { store, entries, stale, cache, verify } = args;
+  const items = { ...cache.items };
+  const outcome = noOutcome();
+  const present = verify && store.list ? new Map((await store.list()).map((item) => [item.id, item.ref])) : void 0;
+  for (const e of entries.values()) {
+    const sent = items[e.id];
+    try {
+      if (e.status !== "active") {
+        const ref2 = sent?.ref ?? present?.get(e.id);
+        if (!ref2) continue;
+        await store.remove(ref2);
+        delete items[e.id];
+        outcome.removed.push(e.id);
+        continue;
+      }
+      if (stale.has(e.id)) continue;
+      const text = renderItem(e, cache.project);
+      if (sent?.text === text) {
+        if (present && !present.has(e.id)) outcome.missing.push(e.id);
+        continue;
+      }
+      const remote = await store.fetch?.(e.id);
+      const remoteUpdated = remote ? readSignature(remote.text)?.updated : void 0;
+      if (remoteUpdated && remoteUpdated > e.updated) {
+        outcome.newer.push(e.id);
+        continue;
+      }
+      if (remote && remote.text.trimEnd() === text.trimEnd()) {
+        items[e.id] = { ref: remote.ref, text, updated: e.updated };
+        outcome.adopted.push(e.id);
+        continue;
+      }
+      const ref = await store.put(e.id, text, sent?.ref ?? remote?.ref);
+      items[e.id] = { ref, text, updated: e.updated };
+      outcome.written.push(e.id);
+    } catch (err) {
+      outcome.failed.push({ id: e.id, error: messageOf(err) });
+    }
+  }
+  if (present) {
+    for (const id of present.keys()) if (!entries.has(id)) outcome.unknown.push(id);
+  }
+  return { cache: { ...cache, items, ...present ? { missing: outcome.missing, unknown: outcome.unknown } : {} }, outcome };
+};
+var memoryOutcomeText = (outcome) => {
+  const counts = [
+    [outcome.written.length, "written"],
+    [outcome.adopted.length, "already there"],
+    [outcome.removed.length, "removed"],
+    [outcome.newer.length, "newer in memory"],
+    [outcome.missing.length, "gone from memory"],
+    [outcome.unknown.length, "unknown to this ledger"],
+    [outcome.failed.length, "failed"]
+  ];
+  const said = counts.filter(([n]) => n).map(([n, what]) => `${n} ${what}`);
+  const firstFailure = outcome.failed[0];
+  return said.length ? `${said.join(", ")}${firstFailure ? ` (${firstFailure.id}: ${firstFailure.error})` : ""}` : "nothing to do";
+};
+var memoryCachePath = (store) => `.archivist/.local/memory-${store}.json`;
+var loadMemoryCache = async (io, store, project) => {
+  const fresh = { store, project, items: {} };
+  try {
+    const saved = JSON.parse(await io.read(memoryCachePath(store)) ?? "null");
+    return saved?.store === store && saved.project === project && saved.items ? saved : fresh;
+  } catch {
+    return fresh;
+  }
+};
+var loadMemoryCaches = async (io) => {
+  const caches = [];
+  for (const name of await io.list(".archivist/.local")) {
+    const store = name.match(/^memory-(.+)\.json$/)?.[1];
+    if (!store) continue;
+    try {
+      const cache = JSON.parse(await io.read(memoryCachePath(store)) ?? "null");
+      if (cache?.items) caches.push(cache);
+    } catch {
+      continue;
+    }
+  }
+  return caches;
+};
+var ledgerMark = (text) => `${text.length}:${text.slice(-64)}`;
+var memoryUpToDate = async (io) => {
+  const caches = await loadMemoryCaches(io);
+  const mark2 = ledgerMark(await io.read(PATHS.ledger) ?? "");
+  return caches.length > 0 && caches.every((cache) => cache.ledgerMark === mark2 && !cache.lastError);
+};
+var clearMemory = async (io, store, project) => {
+  const removed = [];
+  for (const item of await store.list?.() ?? []) {
+    const remote = await store.fetch?.(item.id);
+    if (!remote || readSignature(remote.text)?.project !== project) continue;
+    await store.remove(item.ref);
+    removed.push(item.id);
+  }
+  const forgotten = { store: store.name, project, items: {} };
+  await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(forgotten, null, 1) + "\n"));
+  return removed;
+};
+var syncMemory = async (args) => {
+  const { io, store, project, mode, now } = args;
+  const ledgerText = await io.read(PATHS.ledger) ?? "";
+  const mark2 = ledgerMark(ledgerText);
+  const cache = await loadMemoryCache(io, store.name, project);
+  const firstSync = !cache.lastSync;
+  if (mode === "fast" && !firstSync && cache.ledgerMark === mark2 && !cache.lastError) return void 0;
+  const entries = foldLedger(parseLedger(ledgerText).records);
+  const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify: mode === "verify" || firstSync });
+  const failure = outcome.failed[0];
+  const saved = { ...next, ledgerMark: mark2, lastSync: now, lastError: failure ? `${failure.id}: ${failure.error}` : void 0 };
+  await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
+  return outcome;
+};
+
 // src/core/maintenance.ts
 var RECENT = 30;
 var statsText = async (io, entries) => {
@@ -1003,6 +1163,12 @@ var lint = async (io, entries, config) => {
   return out;
 };
 var WEEK = 7 * 864e5;
+var memoryLines = (memories) => memories.flatMap((m) => [
+  `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
+  ...m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : [],
+  ...m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : [],
+  ...m.lastError ? [`- last error: ${m.lastError}`] : []
+]);
 var healthText = async (io, entries, config, now, extras = {}) => {
   const since = new Date(now.getTime() - WEEK).toISOString();
   const active = activeEntries(entries);
@@ -1026,7 +1192,7 @@ var healthText = async (io, entries, config, now, extras = {}) => {
   const spent = week.reduce((s, a) => s + a.tokens, 0);
   const usage = await loadUsage(io);
   const met = active.filter((e) => usage[e.id]).length;
-  const neverMet = active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since);
+  const neverMet = config.rules.files ? active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since) : [];
   const wrong = active.filter((e) => (usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0));
   const warnings = (await lint(io, entries, config)).filter((f) => f.level === "warn");
   const k2 = (n) => n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
@@ -1048,10 +1214,15 @@ var healthText = async (io, entries, config, now, extras = {}) => {
     ...neverMet.length ? [`- never met, older than a week: ${neverMet.slice(0, 5).map((e) => `\`${e.id}\` ${e.title}`).join("; ")}${neverMet.length > 5 ? ` and ${neverMet.length - 5} more` : ""}`] : [],
     ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
   ];
+  const memories = await loadMemoryCaches(io);
+  if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
   const todo = [];
   if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
   if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
+  if (memories.some((m) => m.lastError)) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
+  if (!config.rules.files && !memories.some((m) => Object.keys(m.items).length))
+    todo.push("rule files are off and no memory has received the entries: no agent sees them (connect a memory plugin, or set rules.files to true)");
   if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
   if (neverMet.length >= 3) todo.push(`${neverMet.length} entries never met in a week: archivist gc --days 7 lists them, --apply retires them`);
   if (warnings.some((w) => !w.text.includes("stale") && !w.text.includes("judged wrong"))) todo.push("lint findings above: merge or fix them with /archivist edit or /archivist deprecate");
@@ -1060,6 +1231,54 @@ var healthText = async (io, entries, config, now, extras = {}) => {
   if (!await loadBaseline(io)) todo.push("no baseline yet: archivist baseline, so /archivist stats can show the effect");
   lines.push("", "## What to do", ...todo.length ? todo.map((t) => `- ${t}`) : ["- Nothing: Archivist is doing fine here."]);
   return lines.join("\n") + "\n";
+};
+
+// src/core/memory-openviking.ts
+var NEEDED_TOOLS = ["write", "forget", "read", "list"];
+var findOpenVikingServer = (tools) => {
+  const toolsByServer = /* @__PURE__ */ new Map();
+  for (const tool of tools) toolsByServer.set(tool.serverName, (toolsByServer.get(tool.serverName) ?? /* @__PURE__ */ new Set()).add(tool.name.split("__").at(-1) ?? ""));
+  for (const [server, names] of toolsByServer) if (/openviking/i.test(server) && NEEDED_TOOLS.every((name) => names.has(name))) return server;
+  return void 0;
+};
+var isNotFound = (text) => /not found: viking:\/\//i.test(text) && !text.trim().includes("\n");
+var unwrapped = (text) => {
+  try {
+    const value = JSON.parse(text);
+    return typeof value?.result === "string" ? value.result : text;
+  } catch {
+    return text;
+  }
+};
+var textOrThrow = (reply) => {
+  if (reply.isError) throw new Error(reply.text.trim());
+  return unwrapped(reply.text);
+};
+var openVikingStore = (call, project) => {
+  const folder = `viking://resources/archivist/${project}/`;
+  const uriOf = (id) => `${folder}${id}.md`;
+  return {
+    name: "openviking",
+    async put(id, text) {
+      textOrThrow(await call("write", { uri: uriOf(id), content: text, mode: "replace" }));
+      return uriOf(id);
+    },
+    async remove(ref) {
+      const reply = await call("forget", { uri: ref });
+      if (reply.isError && !isNotFound(reply.text)) throw new Error(reply.text.trim());
+    },
+    async fetch(id) {
+      const reply = await call("read", { uris: [uriOf(id)] });
+      if (isNotFound(reply.text)) return void 0;
+      if (reply.isError) throw new Error(reply.text.trim());
+      return { ref: uriOf(id), text: reply.text };
+    },
+    async list() {
+      const reply = await call("list", { uri: folder });
+      if (isNotFound(reply.text)) return [];
+      return textOrThrow(reply).split("\n").map((line) => line.match(/^\[file\] ([^./][^/]*)\.md$/)?.[1]).filter((id) => Boolean(id)).map((id) => ({ id, ref: uriOf(id) }));
+    }
+  };
 };
 
 // src/core/log.ts
@@ -1352,7 +1571,7 @@ var pickCandidates = (entries, seg2, edits, k2 = TOP_K) => {
   for (const e of [...scoped, ...ranked]) if (!out.includes(e) && out.length < k2) out.push(e);
   return out;
 };
-var committed = async (io, segment) => (await loadAnalyses(io)).some((a) => a.segment === segment) || parseLedger(await io.read(PATHS.ledger) ?? "").records.some((r) => r.src?.segment === segment) || (await listProposals(io)).some((p) => p.src?.segment === segment);
+var alreadyAnalysed = async (io, segment2) => (await loadAnalyses(io)).some((a) => a.segment === segment2) || parseLedger(await io.read(PATHS.ledger) ?? "").records.some((r) => r.src?.segment === segment2) || (await listProposals(io)).some((p) => p.src?.segment === segment2);
 var readDocs = async (io) => {
   const out = [];
   for (const p of DOCS) {
@@ -1367,7 +1586,7 @@ var analyzeSegment = async (args) => {
   const signals = computeSignals(seg2);
   let usage = emptyUsage();
   const pre = await withLock(io, async () => {
-    if (await committed(io, seg2.id)) {
+    if (await alreadyAnalysed(io, seg2.id)) {
       await renderAll(io, (await loadState(io)).entries, config);
       return void 0;
     }
@@ -1519,6 +1738,8 @@ var LAST_KEY = "archivist:last:";
 var RETRY_MS = 15 * 6e4;
 var BUSY_RETRY_MS = 6e4;
 var FORK_TIMEOUT_MS = 12e4;
+var MEMORY_CHECK_AFTER_START_MS = 5e3;
+var NO_MEMORY = "No supported memory plugin is connected to this session (Archivist supports OpenViking).";
 var segKey = (s) => `${SEG_KEY}${s.session}:${s.id}`;
 var toUsage2 = (u) => ({
   input: u?.input_tokens ?? 0,
@@ -1546,6 +1767,8 @@ var ownTurnPending = false;
 var lastStatus;
 var statusKind;
 var ownTurns = /* @__PURE__ */ new Set();
+var memoryBusy = false;
+var memoryAgain;
 var newSegment = () => ({
   id: Date.now().toString(36),
   session,
@@ -1580,7 +1803,6 @@ function makeIo($, base) {
       const entries = await $.fs.list(abs(dir));
       return entries.map((e) => e.name);
     },
-    // $.fs has no exclusive create: mkdir through the shell is the atomic step, and fails when the lock exists.
     mutex: {
       async claim(p) {
         await $.process.run(["mkdir", "-p", abs(p).replace(/\/[^/]+$/, "")]);
@@ -1648,6 +1870,75 @@ async function refreshStatus($, io) {
   const queued = (await listProposals(io)).length;
   showStatus($, countsText(n, queued), "counts");
 }
+function mcpCaller($, server) {
+  return async (tool, args) => {
+    const reply = await $.mcp.call(server, tool, args);
+    const blocks = reply.content ?? [];
+    return { text: blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n"), isError: Boolean(reply.isError) };
+  };
+}
+async function memoryServer($, config) {
+  if (config.memory.server !== "auto") return config.memory.server;
+  const usage = await $.session.usage({ breakdown: "summary" });
+  return findOpenVikingServer(usage.context?.breakdown?.mcpTools ?? []);
+}
+async function gitRemote($, base) {
+  const run = await $.process.run(["git", "-C", base, "remote", "get-url", "origin"]);
+  return run.exitCode === 0 ? String(run.stdout ?? "").trim() || void 0 : void 0;
+}
+async function memoryTarget($, base, config) {
+  const server = await memoryServer($, config);
+  if (!server) return void 0;
+  const project = config.memory.project !== "auto" ? config.memory.project : projectId(await gitRemote($, base), base);
+  return { server, project, store: openVikingStore(mcpCaller($, server), project) };
+}
+async function syncToMemory($, base, mode) {
+  if (memoryBusy) {
+    memoryAgain = mode === "verify" || memoryAgain === "verify" ? "verify" : "fast";
+    return;
+  }
+  memoryBusy = true;
+  try {
+    const io = makeIo($, base);
+    const config = await loadConfig(io);
+    if (!config.enabled || !config.memory.enabled) return;
+    if (mode === "fast" && await memoryUpToDate(io)) return;
+    const target = await memoryTarget($, base, config);
+    if (!target) return;
+    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: (/* @__PURE__ */ new Date()).toISOString() });
+    if (outcome) await log($, base, `memory ${mode} (${target.server}, ${target.project}): ${memoryOutcomeText(outcome)}`);
+  } catch (err) {
+    await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    memoryBusy = false;
+    const again = memoryAgain;
+    memoryAgain = void 0;
+    if (again) await syncToMemory($, base, again);
+  }
+}
+function syncToMemoryLater($, base, mode, delayMs = 0) {
+  $.clock.after(delayMs, async () => syncToMemory($, base, mode));
+}
+async function memoryCommand($, io, config, action) {
+  const target = await memoryTarget($, root, config);
+  const where = target ? `${target.server}, project ${target.project}` : "";
+  const syncOn = config.enabled && config.memory.enabled;
+  if (action === "sync") {
+    if (!syncOn) return "Memory sync is off: set memory.enabled to true in .archivist/config.json.";
+    if (!target) return NO_MEMORY;
+    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: "verify", now: (/* @__PURE__ */ new Date()).toISOString() });
+    return `Synced with ${where}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
+  }
+  if (action === "clear") {
+    if (!target) return NO_MEMORY;
+    const removed = await clearMemory(io, target.store, target.project);
+    return [
+      `Removed ${removed.length} Archivist items from ${where}.`,
+      ...syncOn ? ["Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out."] : []
+    ].join(" ");
+  }
+  return [target ? `Memory: ${where}${syncOn ? "" : " (sync is off: memory.enabled)"}` : NO_MEMORY, ...memoryLines(await loadMemoryCaches(io))].join("\n");
+}
 async function analyse($, stored, current) {
   const s = stored.seg;
   if (analysing) {
@@ -1703,6 +1994,7 @@ async function analyse($, stored, current) {
     notice = noticeText(result.report);
     showStatus($, statusLine(result.report), "result");
     $.ui.toast(statusLine(result.report), { timeoutMs: config.report.toastMs });
+    syncToMemoryLater($, stored.root, "fast");
     if (config.report.mode === "rewake" && current) {
       ownTurnPending = true;
       await $.prompt.submit({
@@ -1736,7 +2028,7 @@ function register(on) {
     await $.command.register({
       name: "archivist",
       description: "Archivist: what it learned from the last task (report) or the knowledge base status (status)",
-      argumentHint: "[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|log]"
+      argumentHint: "[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|memory [status|sync|clear]|log]"
     });
     const waiting = /* @__PURE__ */ new Map();
     for (const key of await $.store.keys()) {
@@ -1757,6 +2049,7 @@ function register(on) {
       });
     }
     await refreshStatus($, makeIo($, root));
+    syncToMemoryLater($, root, "verify", MEMORY_CHECK_AFTER_START_MS);
     return next(e);
   }).catch(($, e, next) => next(e));
   on("session.attach", async ($, e, next) => {
@@ -1828,6 +2121,7 @@ function register(on) {
     }
     if (root && shouldRecount(statusKind)) await refreshStatus($, makeIo($, root));
     else if (lastStatus) $.ui.status(lastStatus);
+    if (root) syncToMemoryLater($, root, "fast");
     if (!notice) return r;
     const text = notice;
     notice = void 0;
@@ -1848,8 +2142,10 @@ function register(on) {
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const r = verb === "deprecate" ? await deprecateEntry(io, cfg, id, opts.reason ?? "", now) : await editEntry(io, cfg, id, editFromOptions(opts), now);
       await refreshStatus($, io);
+      syncToMemoryLater($, root, "fast");
       return { text: r.ok ? `${verb === "edit" ? "Updated" : "Retired"} \`${r.entry.id}\`: ${r.entry.title}` : `Not changed: ${r.reason}` };
     }
+    if (verb === "memory") return { text: await memoryCommand($, io, cfg, rest[0] ?? "status") };
     if (verb === "stats") return { text: await statsText(io, (await loadState(io)).entries) };
     if (verb === "health")
       return {
@@ -1870,6 +2166,7 @@ function register(on) {
       }
       const outcomes = await applyProposals(io, cfg, chosen, now);
       await refreshStatus($, io);
+      syncToMemoryLater($, root, "fast");
       return { text: ["Recorded:", ...outcomes.map((o) => `- ${o.title ?? ""}${o.id ? ` \`${o.id}\`` : ""}${o.reason ? ` (${o.reason})` : ""}`)].join("\n") };
     }
     if (verb === "status") {

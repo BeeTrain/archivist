@@ -59,7 +59,8 @@ var DEFAULT_CONFIG = {
   },
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
-  rules: { decisions: "compact" },
+  rules: { decisions: "compact", files: true },
+  memory: { enabled: true, server: "auto", project: "auto" },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15e3 },
   review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 }
@@ -383,11 +384,13 @@ var renderSkill = (e) => {
 var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}) => {
   const all = [...entries.values()];
   const views = /* @__PURE__ */ new Map();
-  views.set(PATHS.coreRule, renderCore(all, config, stale, usage));
-  for (const [path, text] of renderAreas(all, config, stale, usage)) views.set(path, text);
+  if (config.rules.files) {
+    views.set(PATHS.coreRule, renderCore(all, config, stale, usage));
+    for (const [path, text] of renderAreas(all, config, stale, usage)) views.set(path, text);
+    for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
+  }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
-  for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
   return views;
 };
 var findStale = async (io, entries) => {
@@ -1037,6 +1040,23 @@ var readProjectSegments = async (root, before, dir = transcriptDir(root)) => {
   return { sessions, segments };
 };
 
+// src/core/memory.ts
+var memoryCachePath = (store) => `.archivist/.local/memory-${store}.json`;
+var loadMemoryCaches = async (io) => {
+  const caches = [];
+  for (const name of await io.list(".archivist/.local")) {
+    const store = name.match(/^memory-(.+)\.json$/)?.[1];
+    if (!store) continue;
+    try {
+      const cache = JSON.parse(await io.read(memoryCachePath(store)) ?? "null");
+      if (cache?.items) caches.push(cache);
+    } catch {
+      continue;
+    }
+  }
+  return caches;
+};
+
 // src/core/maintenance.ts
 var RECENT = 30;
 var statsText = async (io, entries) => {
@@ -1110,6 +1130,12 @@ var lint = async (io, entries, config) => {
   return out;
 };
 var WEEK = 7 * 864e5;
+var memoryLines = (memories) => memories.flatMap((m) => [
+  `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
+  ...m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : [],
+  ...m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : [],
+  ...m.lastError ? [`- last error: ${m.lastError}`] : []
+]);
 var healthText = async (io, entries, config, now2, extras = {}) => {
   const since = new Date(now2.getTime() - WEEK).toISOString();
   const active = activeEntries(entries);
@@ -1133,7 +1159,7 @@ var healthText = async (io, entries, config, now2, extras = {}) => {
   const spent = week.reduce((s, a) => s + a.tokens, 0);
   const usage = await loadUsage(io);
   const met = active.filter((e) => usage[e.id]).length;
-  const neverMet = active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since);
+  const neverMet = config.rules.files ? active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since) : [];
   const wrong = active.filter((e) => (usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0));
   const warnings = (await lint(io, entries, config)).filter((f) => f.level === "warn");
   const k = (n) => n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
@@ -1155,10 +1181,15 @@ var healthText = async (io, entries, config, now2, extras = {}) => {
     ...neverMet.length ? [`- never met, older than a week: ${neverMet.slice(0, 5).map((e) => `\`${e.id}\` ${e.title}`).join("; ")}${neverMet.length > 5 ? ` and ${neverMet.length - 5} more` : ""}`] : [],
     ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
   ];
+  const memories = await loadMemoryCaches(io);
+  if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
   const todo = [];
   if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
   if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
+  if (memories.some((m) => m.lastError)) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
+  if (!config.rules.files && !memories.some((m) => Object.keys(m.items).length))
+    todo.push("rule files are off and no memory has received the entries: no agent sees them (connect a memory plugin, or set rules.files to true)");
   if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
   if (neverMet.length >= 3) todo.push(`${neverMet.length} entries never met in a week: archivist gc --days 7 lists them, --apply retires them`);
   if (warnings.some((w) => !w.text.includes("stale") && !w.text.includes("judged wrong"))) todo.push("lint findings above: merge or fix them with /archivist edit or /archivist deprecate");
@@ -1496,6 +1527,8 @@ var gc = async (io, args) => {
   const days = Number(o.days ?? 60);
   const state = await loadState(io);
   const quiet = await gcCandidates(io, state.entries, days, /* @__PURE__ */ new Date());
+  if (!(await loadConfig(io)).rules.files)
+    console.log("Rule files are off, so no rule load counts as use: unused here means no recorded command was run and no task judged the entry.");
   if (!quiet.length) {
     console.log(`Every entry showed a sign of use in the last ${days} days.`);
     return;
@@ -1618,7 +1651,10 @@ var main = async () => {
     case "doctor":
       return await doctor(io) ? 0 : 1;
     case "uninstall": {
+      const inMemory = (await loadMemoryCaches(io)).filter((m) => Object.keys(m.items).length);
       const removed = await uninstall(io.root, rest.includes("--purge"));
+      for (const m of inMemory)
+        console.log(`Entries also live in ${m.store} memory (project ${m.project}): run /archivist memory clear in a Claude Code session to remove them.`);
       for (const r of removed) console.log(`  removed ${r}`);
       if (!removed.length) console.log("Nothing generated by Archivist here.");
       if (!rest.includes("--purge")) console.log(`Kept ${PATHS.dir}/ (the ledger is the knowledge itself): add --purge to remove it too.`);

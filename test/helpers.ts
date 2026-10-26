@@ -1,5 +1,6 @@
 import { DEFAULT_CONFIG, type Config } from "../src/core/config.js";
 import type { Io } from "../src/core/io.js";
+import type { MemoryStore } from "../src/core/memory.js";
 import type { Entry, Segment, ToolEvent } from "../src/core/types.js";
 
 /** In-memory Io. Directories are implied by files; `dirs` adds empty ones (left behind by an earlier version). */
@@ -44,6 +45,37 @@ export const entry = (over: Partial<Entry> & Pick<Entry, "id" | "type" | "title"
   reinforced: 0,
   ...over,
 });
+
+export const fakeMemoryStore = (project: string, seed: Record<string, string> = {}) => {
+  const prefix = `fake://${project}/`;
+  const refOf = (id: string) => `${prefix}${id}.md`;
+  const items = new Map(Object.entries(seed).map(([id, text]) => [refOf(id), text]));
+  const calls: string[] = [];
+  const failPut = new Set<string>();
+  const store: MemoryStore = {
+    name: "fake",
+    async put(id, text) {
+      calls.push(`put ${id}`);
+      if (failPut.has(id)) throw new Error("server down");
+      items.set(refOf(id), text);
+      return refOf(id);
+    },
+    async remove(ref) {
+      calls.push(`remove ${ref}`);
+      items.delete(ref);
+    },
+    async fetch(id) {
+      calls.push(`fetch ${id}`);
+      const text = items.get(refOf(id));
+      return text === undefined ? undefined : { ref: refOf(id), text };
+    },
+    async list() {
+      calls.push("list");
+      return [...items.keys()].filter((ref) => ref.startsWith(prefix)).map((ref) => ({ ref, id: ref.slice(prefix.length, -".md".length) }));
+    },
+  };
+  return { store, items, calls, failPut, refOf };
+};
 
 export const segment = (tools: ToolEvent[], prompts = ["fix the export"]): Segment => ({
   id: "seg1",

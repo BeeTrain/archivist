@@ -87,7 +87,6 @@ const record = async (io: Io, config: Config, ops: ProposedOp[], now: string, sr
   return [...v.applied, ...v.rejected];
 };
 
-/** The chosen proposals another writer has not settled meanwhile (a repeat promoted it, an expiry dropped it). */
 const stillWaiting = async (io: Io, chosen: Proposal[]): Promise<Proposal[]> => {
   const out: Proposal[] = [];
   for (const p of chosen) if (await io.exists(p.path)) out.push(p);

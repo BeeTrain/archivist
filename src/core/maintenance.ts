@@ -3,6 +3,7 @@
 import type { Config } from "./config.js";
 import { PATHS, type Io } from "./io.js";
 import { activeEntries } from "./ledger.js";
+import { loadMemoryCaches, type MemoryCache } from "./memory.js";
 import { compareText, loadAnalyses, loadBaseline, loadMetrics, summarize } from "./metrics.js";
 import { listProposals, needsHuman } from "./review.js";
 import { adrPath, findStale, groupAreas, renderCore } from "./render.js";
@@ -114,6 +115,14 @@ export interface HealthExtras {
 
 const WEEK = 7 * 86_400_000;
 
+export const memoryLines = (memories: MemoryCache[]): string[] =>
+  memories.flatMap((m) => [
+    `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
+    ...(m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : []),
+    ...(m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : []),
+    ...(m.lastError ? [`- last error: ${m.lastError}`] : []),
+  ]);
+
 /**
  * One look at how Archivist is doing in this project: the knowledge base, the last week of analyses, which
  * entries tasks actually meet, what lint finds, and what to do about it. Deterministic: no model call.
@@ -144,7 +153,7 @@ export const healthText = async (io: Io, entries: Map<string, Entry>, config: Co
   const usage = await loadUsage(io);
   const met = active.filter((e) => usage[e.id]).length;
   // Stale entries have their own line: counted once, where the fix is.
-  const neverMet = active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since);
+  const neverMet = config.rules.files ? active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since) : [];
   const wrong = active.filter((e) => (usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0));
   const warnings = (await lint(io, entries, config)).filter((f) => f.level === "warn");
   const k = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
@@ -169,11 +178,16 @@ export const healthText = async (io: Io, entries: Map<string, Entry>, config: Co
     ...(neverMet.length ? [`- never met, older than a week: ${neverMet.slice(0, 5).map((e) => `\`${e.id}\` ${e.title}`).join("; ")}${neverMet.length > 5 ? ` and ${neverMet.length - 5} more` : ""}`] : []),
     ...(wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []),
   ];
+  const memories = await loadMemoryCaches(io);
+  if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...(warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []));
 
   const todo: string[] = [];
   if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
   if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
+  if (memories.some((m) => m.lastError)) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
+  if (!config.rules.files && !memories.some((m) => Object.keys(m.items).length))
+    todo.push("rule files are off and no memory has received the entries: no agent sees them (connect a memory plugin, or set rules.files to true)");
   if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
   if (neverMet.length >= 3) todo.push(`${neverMet.length} entries never met in a week: archivist gc --days 7 lists them, --apply retires them`);
   if (warnings.some((w) => !w.text.includes("stale") && !w.text.includes("judged wrong"))) todo.push("lint findings above: merge or fix them with /archivist edit or /archivist deprecate");

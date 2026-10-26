@@ -10,7 +10,6 @@ export const ANALYSES = ".archivist/.local/analyses.jsonl";
 
 export interface AnalysisRecord {
   ts: string;
-  /** The task analysed: a retry finds it here and does not write it twice. */
   segment?: string;
   outcome: "done" | "skipped";
   applied: number;
@@ -37,7 +36,6 @@ export const loadAnalyses = async (io: Io): Promise<AnalysisRecord[]> =>
 
 export interface TaskMetrics {
   ts: string;
-  /** The live task measured; absent for the baseline, which is read from transcripts. */
   segment?: string;
   source: "live" | "baseline";
   turns: number;

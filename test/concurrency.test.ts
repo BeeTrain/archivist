@@ -13,7 +13,6 @@ import { loadUsage } from "../src/core/usage.js";
 import { nodeIo } from "../src/cli/node-io.js";
 import { config, memoryIo, segment } from "./helpers.js";
 
-/** A mutex over a set of names, on a clock that moves only when someone sleeps. */
 const memoryMutex = () => {
   let clock = 0;
   const held = new Map<string, number>();
@@ -109,7 +108,6 @@ describe("analysis against a base that changed meanwhile", () => {
     const io = memoryIo();
     const llm: Llm = {
       async complete() {
-        // The triage skill records through the CLI while the curator thinks.
         await addEntry(io, config(), { type: "decision", title: "Docs in Russian", content: "Write the docs in Russian", rationale: "the rest is" }, now.toISOString());
         await addEntry(io, config(), { type: "gotcha", title: "Flaky login test", content: "Retry the login e2e test once before failing" }, now.toISOString());
         return {

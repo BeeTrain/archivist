@@ -1,6 +1,4 @@
 // Segment → signals → (gate) → reflect → curate → validate → ledger → views → report.
-// The model calls run outside the write lock (they take minutes); what is written goes through it in two short
-// sections, and the second validates against the base as it is then, not as it was before the model calls.
 import type { Config } from "../core/config.js";
 import { PATHS, joinPath, type Io, type Llm } from "../core/io.js";
 import { activeEntries, appendLedger, loadState, parseLedger } from "../core/ledger.js";
@@ -48,12 +46,7 @@ export const pickCandidates = (entries: Entry[], seg: Segment, edits: string[], 
   return out;
 };
 
-/**
- * Whether a task's results are written already, wholly or in part. The mod retries a task whose analysis threw;
- * one that threw after the ledger write must not record its facts twice, or a fact it proposed would count as its
- * own repeat and be promoted.
- */
-const committed = async (io: Io, segment: string): Promise<boolean> =>
+const alreadyAnalysed = async (io: Io, segment: string): Promise<boolean> =>
   (await loadAnalyses(io)).some((a) => a.segment === segment) ||
   parseLedger((await io.read(PATHS.ledger)) ?? "").records.some((r) => r.src?.segment === segment) ||
   (await listProposals(io)).some((p) => p.src?.segment === segment);
@@ -84,8 +77,7 @@ export const analyzeSegment = async (args: {
   let usage = emptyUsage();
 
   const pre = await withLock(io, async () => {
-    if (await committed(io, seg.id)) {
-      // A retry after a failure past the ledger write: what was written stays, the views catch up with it.
+    if (await alreadyAnalysed(io, seg.id)) {
       await renderAll(io, (await loadState(io)).entries, config);
       return undefined;
     }
@@ -96,7 +88,6 @@ export const analyzeSegment = async (args: {
     const seen = [...groupAreas(active)].filter(([path]) => loaded.has(path)).flatMap(([, a]) => a.items.map((e) => e.id));
     const used = commandsUsed(active, seg.tools);
     // Every task is measured, trivial ones too: the metrics are what tells whether the knowledge pays off.
-    // Once: a retry finds the task measured and its counters counted.
     if (!(await loadMetrics(io)).some((m) => m.segment === seg.id)) {
       await appendMetrics(io, { ...toMetrics(signals, ts, "live"), segment: seg.id });
       const counters = await loadUsage(io);
@@ -148,8 +139,7 @@ export const analyzeSegment = async (args: {
   if (!c.ok) error = [error, `curate: ${c.reason}`].filter(Boolean).join("; ");
   else if (!reply) error = [error, "curate: reply was not JSON"].filter(Boolean).join("; ");
 
-  // 3. Validate, apply, render: against the base as it is now, since the CLI or another session may have
-  // recorded something while the models ran (a duplicate becomes a reinforce, ADR numbers stay unique).
+  // 3. Validate, apply, render.
   return withLock(io, async () => {
     const state = await loadState(io);
     const known = new Set(activeEntries(state.entries).map((e) => e.id));

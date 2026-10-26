@@ -190,11 +190,13 @@ export const renderSkill = (e: Entry): string => {
 export const renderViews = (entries: Map<string, Entry>, config: Config, stale = new Set<string>(), usage: UsageMap = {}): Map<string, string> => {
   const all = [...entries.values()];
   const views = new Map<string, string>();
-  views.set(PATHS.coreRule, renderCore(all, config, stale, usage));
-  for (const [path, text] of renderAreas(all, config, stale, usage)) views.set(path, text);
+  if (config.rules.files) {
+    views.set(PATHS.coreRule, renderCore(all, config, stale, usage));
+    for (const [path, text] of renderAreas(all, config, stale, usage)) views.set(path, text);
+    for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
+  }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
-  for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
   return views;
 };
 
