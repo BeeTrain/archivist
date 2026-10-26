@@ -1269,9 +1269,10 @@ var openVikingStore = (call, project) => {
     },
     async fetch(id) {
       const reply = await call("read", { uris: [uriOf(id)] });
-      if (isNotFound(reply.text)) return void 0;
-      if (reply.isError) throw new Error(reply.text.trim());
-      return { ref: uriOf(id), text: reply.text };
+      const text = unwrapped(reply.text);
+      if (isNotFound(text)) return void 0;
+      if (reply.isError) throw new Error(text.trim());
+      return { ref: uriOf(id), text };
     },
     async list() {
       const reply = await call("list", { uri: folder });

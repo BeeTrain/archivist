@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { reconcile } from "../src/core/memory.js";
 import { findOpenVikingServer, openVikingStore, type McpReply } from "../src/core/memory-openviking.js";
+import { entry } from "./helpers.js";
 
 const project = "github.com/beetrain/archivist";
 const base = "viking://resources/archivist/github.com/beetrain/archivist/";
@@ -57,6 +59,23 @@ describe("the OpenViking store", () => {
     expect(present.calls[0]).toEqual({ tool: "read", args: { uris: [`${base}gk-1.md`] } });
     const absent = server({ read: { isError: false, text: `File not found: ${base}gk-1.md` } });
     expect(await absent.store.fetch!("gk-1")).toBeUndefined();
+  });
+
+  it("reads an item from the answer wrapped as the server sends it", async () => {
+    const item = "# Title\n\nGotcha: one\n\nProject: x · Archivist gk-1 · updated 2026-10-23T10:00:00.000Z\n";
+    const present = server({ read: { isError: false, text: JSON.stringify({ result: item }) } });
+    expect(await present.store.fetch!("gk-1")).toEqual({ ref: `${base}gk-1.md`, text: item });
+    const absent = server({ read: { isError: false, text: JSON.stringify({ result: `File not found: ${base}gk-1.md` }) } });
+    expect(await absent.store.fetch!("gk-1")).toBeUndefined();
+  });
+
+  it("never overwrites a newer item it read from a wrapped answer", async () => {
+    const newer = `# Title\n\nGotcha: changed by another clone\n\nProject: ${project} · Archivist gk-1 · updated 2026-10-24T00:00:00.000Z\n`;
+    const { calls, store } = server({ read: { isError: false, text: JSON.stringify({ result: newer }) } });
+    const entries = new Map([["gk-1", entry({ id: "gk-1", type: "gotcha", title: "Title", content: "one", updated: "2026-10-23T10:00:00.000Z" })]]);
+    const { outcome } = await reconcile({ store, entries, stale: new Set(), cache: { store: "openviking", project, items: {} }, verify: false });
+    expect(outcome.newer).toEqual(["gk-1"]);
+    expect(calls.map((c) => c.tool)).toEqual(["read"]);
   });
 
   it("lists the project's item files and nothing else, from the answer wrapped as the server sends it", async () => {

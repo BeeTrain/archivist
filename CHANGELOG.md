@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1 — 2026-10-26
+
+- Fix: an OpenViking read answered as `{"result": …}`, the way writes and listings are, was taken as it came, unwrapped. The signature then went unread, so a newer version from another clone could be overwritten, an item already in memory was written again, and `/archivist memory clear` removed nothing.
+
 ## 1.4.0 — 2026-10-23
 
 - External memory: when a long-term memory plugin is connected to the session (OpenViking for now), Archivist keeps its entries there too, so other agents and plugins see them. The ledger stays the source of truth and memory is a projection of it: new and changed entries are written, retired ones removed. Each item is plain text an agent reads without Archivist, signed with the project (from `git remote`), the entry id and when it last changed.
