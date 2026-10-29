@@ -21,7 +21,7 @@
     "memory": {
       "type": "string",
       "title": "External memory",
-      "description": "Where Archivist also keeps its entries: auto finds a connected OpenViking, mem0 uses the address and key below, off keeps them in project files only.",
+      "description": "Where Archivist also keeps its entries: auto uses OpenViking when its plugin is connected, openviking expects it and says when it is missing, mem0 uses the address and key below, off keeps them in project files only.",
       "options": ["auto", "openviking", "mem0", "off"],
       "default": "auto"
     },
