@@ -1,0 +1,169 @@
+import { describe, expect, it } from "vitest";
+import type { Mem0Scope } from "../src/core/mem0-scope.js";
+import { MemoryRefused } from "../src/core/memory.js";
+import { isMem0Cloud, MEM0_CLOUD_URL, mem0CloudStore, mem0StoreName, mem0Transport, type Fetcher, type HttpCall, type HttpReply } from "../src/core/memory-mem0.js";
+
+const project = "github.com/beetrain/archivist";
+const scope: Mem0Scope = { appId: "BeeTrain-archivist", agentId: "BeeTrain-archivist-0123456789", userId: "dev-user" };
+const signature = { project, id: "gk-1", updated: "2026-10-23T10:00:00.000Z" };
+const metadata = { archivist_key: `archivist/${project}/gk-1`, archivist_project: project, archivist_id: "gk-1", archivist_updated: "2026-10-23T10:00:00.000Z" };
+const json = (status: number, body: unknown): HttpReply => ({ status, text: JSON.stringify(body) });
+const fakeHttp = (replies: HttpReply[]) => {
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  const http: HttpCall = async (method, path, body) => {
+    calls.push({ method, path, ...(body === undefined ? {} : { body }) });
+    const reply = replies.shift();
+    if (!reply) throw new Error(`unexpected ${method} ${path}`);
+    return reply;
+  };
+  return { calls, http };
+};
+
+describe("talking to mem0", () => {
+  const recording = (reply: HttpReply = { status: 200, text: "{}" }) => {
+    const seen: { url: string; init: Parameters<Fetcher>[1] }[] = [];
+    const fetcher: Fetcher = async (url, init) => (seen.push({ url, init }), reply);
+    return { seen, fetcher };
+  };
+
+  it("joins the address and the path without a double slash and sends JSON with the auth header", async () => {
+    const { seen, fetcher } = recording();
+    await mem0Transport(fetcher, "http://localhost:8888/", { header: "X-API-Key", value: "k-123", secret: "k-123" })("POST", "/memories", { a: 1 });
+    expect(seen[0]).toEqual({ url: "http://localhost:8888/memories", init: { method: "POST", headers: { "Content-Type": "application/json", "X-API-Key": "k-123" }, body: '{"a":1}' } });
+  });
+
+  it("sends no auth header without a key", async () => {
+    const { seen, fetcher } = recording();
+    await mem0Transport(fetcher, "http://localhost:8888", undefined)("GET", "/memories");
+    expect(seen[0]?.init).toEqual({ method: "GET", headers: { "Content-Type": "application/json" } });
+  });
+
+  it("masks the key when the server repeats it", async () => {
+    const { fetcher } = recording({ status: 401, text: '{"detail":"bad key k-123"}' });
+    const reply = await mem0Transport(fetcher, MEM0_CLOUD_URL, { header: "Authorization", value: "Token k-123", secret: "k-123" })("GET", "/v1/ping/");
+    expect(reply.text).toBe('{"detail":"bad key ***"}');
+  });
+
+  it("names the address when the server cannot be reached", async () => {
+    const fetcher: Fetcher = async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:8888");
+    };
+    await expect(mem0Transport(fetcher, "http://localhost:8888/", undefined)("GET", "/memories")).rejects.toThrow("mem0 at http://localhost:8888 is unreachable: connect ECONNREFUSED");
+  });
+
+  it.each<[string, boolean]>([
+    ["", true],
+    ["https://api.mem0.ai", true],
+    ["https://eu.api.mem0.ai/", true],
+    ["http://localhost:8888", false],
+    ["https://mem0.ai.example.com", false],
+  ])("takes %j for the cloud: %s", (address, cloud) => expect(isMem0Cloud(address)).toBe(cloud));
+
+  it.each([
+    ["", "mem0"],
+    ["https://api.mem0.ai", "mem0"],
+    ["http://localhost:8888", "mem0-localhost-8888"],
+    ["https://mem0.corp.example/api/", "mem0-mem0.corp.example-api"],
+    ["http://me:secret@localhost:8888", "mem0-localhost-8888"],
+  ])("names the store for %j %s", (address, name) => expect(mem0StoreName(address)).toBe(name));
+});
+
+describe("the mem0 cloud store", () => {
+  it("adds an entry verbatim with the plugin's scope and the signature in flat metadata", async () => {
+    const { calls, http } = fakeHttp([json(200, { status: "SUCCEEDED", results: [{ id: "uuid-1", event: "ADD" }] })]);
+    expect(await mem0CloudStore(http, scope, project).put("gk-1", "# Title\n", undefined, signature)).toBe("uuid-1");
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/v3/memories/add/",
+        body: {
+          messages: [{ role: "user", content: "# Title\n" }],
+          infer: false,
+          immutable: true,
+          app_id: "BeeTrain-archivist",
+          agent_id: "BeeTrain-archivist-0123456789",
+          user_id: "dev-user",
+          metadata,
+        },
+      },
+    ]);
+  });
+
+  it("changes an entry by adding the new version, then deleting the old one", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [{ id: "uuid-2" }] }), json(204, {})]);
+    expect(await mem0CloudStore(http, scope, project).put("gk-1", "# New\n", "uuid-1", signature)).toBe("uuid-2");
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /v3/memories/add/", "DELETE /v1/memories/uuid-1/"]);
+  });
+
+  it("keeps the new version when the old one cannot be deleted", async () => {
+    const { http } = fakeHttp([json(200, { results: [{ id: "uuid-2" }] }), json(500, { detail: "busy" })]);
+    expect(await mem0CloudStore(http, scope, project).put("gk-1", "# New\n", "uuid-1", signature)).toBe("uuid-2");
+  });
+
+  it("does not delete the item it just added when mem0 answers with the same id", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [{ id: "uuid-1" }] })]);
+    expect(await mem0CloudStore(http, scope, project).put("gk-1", "# New\n", "uuid-1", signature)).toBe("uuid-1");
+    expect(calls.map((c) => c.method)).toEqual(["POST"]);
+  });
+
+  it("counts deleting an item that is gone as done, and fails on other errors", async () => {
+    await expect(mem0CloudStore(fakeHttp([json(404, { detail: "not found" })]).http, scope, project).remove("uuid-1")).resolves.toBeUndefined();
+    await expect(mem0CloudStore(fakeHttp([json(500, { detail: "busy" })]).http, scope, project).remove("uuid-1")).rejects.toThrow("HTTP 500");
+  });
+
+  it("lists the project's items with their text, page by page, through one filter", async () => {
+    const item = (id: string, entry: string) => ({ id, memory: `# ${entry}\n`, metadata: { ...metadata, archivist_id: entry } });
+    const { calls, http } = fakeHttp([
+      json(200, { next: "https://api.mem0.ai/v3/memories/?page=2&page_size=200", results: [item("uuid-1", "gk-1"), { id: "uuid-x", memory: "someone else's", metadata: {} }] }),
+      json(200, { next: null, results: [item("uuid-2", "cmd-1")] }),
+    ]);
+    expect(await mem0CloudStore(http, scope, project).list!()).toEqual({
+      items: [
+        { ref: "uuid-1", id: "gk-1", text: "# gk-1\n" },
+        { ref: "uuid-2", id: "cmd-1", text: "# cmd-1\n" },
+      ],
+    });
+    expect(calls[0]).toEqual({
+      method: "POST",
+      path: "/v3/memories/?page=1&page_size=200",
+      body: {
+        filters: { AND: [{ app_id: "BeeTrain-archivist" }, { metadata: { archivist_project: project } }] },
+        fields: ["id", "memory", "metadata", "updated_at"],
+      },
+    });
+    expect(calls[1]?.path).toBe("/v3/memories/?page=2&page_size=200");
+  });
+
+  it("finds an entry by its key and takes the newest of two copies", async () => {
+    const copy = (id: string, updated: string) => ({ id, memory: `# T\n\nProject: ${project} · Archivist gk-1 · updated ${updated}\n`, metadata });
+    const { calls, http } = fakeHttp([json(200, { next: null, results: [copy("uuid-1", "2026-10-22T10:00:00.000Z"), copy("uuid-2", "2026-10-23T10:00:00.000Z")] })]);
+    expect((await mem0CloudStore(http, scope, project).fetch!("gk-1"))?.ref).toBe("uuid-2");
+    expect(calls[0]?.body).toMatchObject({ filters: { AND: [{ app_id: "BeeTrain-archivist" }, { metadata: { archivist_key: metadata.archivist_key } }] } });
+  });
+
+  it.each([401, 402, 403, 429])("stops on HTTP %i with what mem0 said", async (status) => {
+    const failure = mem0CloudStore(fakeHttp([json(status, { detail: "Invalid API key" })]).http, scope, project).put("gk-1", "# T\n", undefined, signature);
+    await expect(failure).rejects.toBeInstanceOf(MemoryRefused);
+    await expect(failure).rejects.toThrow(`(HTTP ${status}): Invalid API key`);
+  });
+
+  it("gives a short reason when mem0 answers with something that is not JSON", async () => {
+    const error = await mem0CloudStore(fakeHttp([{ status: 502, text: `<html>${"x".repeat(5000)}</html>` }]).http, scope, project)
+      .remove("uuid-1")
+      .catch((e: unknown) => e);
+    expect(String(error)).toContain("HTTP 502");
+    expect(String(error).length).toBeLessThan(300);
+  });
+
+  it("gives a short reason when a successful answer is not JSON", async () => {
+    const error = await mem0CloudStore(fakeHttp([{ status: 200, text: `<html>sign in to the proxy${" ".repeat(3000)}</html>` }]).http, scope, project)
+      .list!()
+      .catch((e: unknown) => e);
+    expect(String(error)).toContain("mem0 answered with something that is not JSON (HTTP 200): <html>sign in to the proxy");
+    expect(String(error).length).toBeLessThan(300);
+  });
+
+  it("says its reads cost quota and its listing carries the text", () => {
+    expect(mem0CloudStore(fakeHttp([]).http, scope, project)).toMatchObject({ name: "mem0", readsCostQuota: true, listsText: true });
+  });
+});
