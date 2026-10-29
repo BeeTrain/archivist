@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0 — 2026-10-29
+
+- The memory is chosen in the plugin options (`/config`): `auto` finds a connected OpenViking as before, `openviking` asks for it, `mem0` uses the mem0 address and key, `off` keeps entries in project files only. The options are personal, so each person on a team picks their own memory, and none of it goes into git.
+- mem0, in the cloud and on an own server, over its REST API: entries are written verbatim (`infer: false`) with the scope the mem0 plugins for Claude Code, Codex and Cursor compute, so their recall in the cloud finds them. An empty address means the mem0 cloud, with the key from the options or `MEM0_API_KEY`; any other address is an own mem0 server, with the key from the options only, or none for a server without auth.
+- The cloud gets only the projects in a personal list: `/archivist memory on|off` adds or removes the current one, and a project not in it gets a one-time hint. The cloud is checked at most once a day per project, since its reads cost quota; a refused key or an exhausted quota pauses sync until the next session or `/archivist memory sync`. Extra copies of an entry, left by a delete that failed, are removed at the next check.
+- `memory.server` is gone from `.archivist/config.json`: the plugin options choose the memory.
+
 ## 1.4.0 — 2026-10-23
 
 - External memory: when a long-term memory plugin is connected to the session (OpenViking for now), Archivist keeps its entries there too, so other agents and plugins see them. The ledger stays the source of truth and memory is a projection of it: new and changed entries are written, retired ones removed. Each item is plain text an agent reads without Archivist, signed with the project (from `git remote`), the entry id and when it last changed.
