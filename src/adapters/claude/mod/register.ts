@@ -14,21 +14,21 @@ import { isExcluded, redact } from '../../../core/privacy.js'
 import { applyProposals, deprecateEntry, describeOp, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
 import { parseOptions, splitArgs } from '../../../core/args.js'
 import { healthText, memoryLines, recallText, statsText } from '../../../core/maintenance.js'
-import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryUpToDate, projectId, syncMemory, type MemoryStore, type SyncMode } from '../../../core/memory.js'
+import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryPaused, memoryUpToDate, projectId, syncMemory, type MemoryStore, type SyncMode } from '../../../core/memory.js'
 import { findOpenVikingServer, openVikingStore, type McpCall } from '../../../core/memory-openviking.js'
 import { mem0Scope } from '../../../core/mem0-scope.js'
 import { mem0CloudStore, mem0ServerStore, mem0StoreName, mem0Transport, type Fetcher, type Mem0Auth } from '../../../core/memory-mem0.js'
 import {
   CLOUD_PROJECTS_OPTION,
-  chooseMemory,
   cloudAllowedBy,
   memorySyncBlock,
-  memoryWhere,
+  placeMemory,
   readMemoryOptions,
   storeNameFor,
   withCloudProject,
   withoutCloudProject,
   type MemoryChoice,
+  type MemoryPlace,
 } from '../../../core/memory-choice.js'
 import { logKey, withLine } from '../../../core/log.js'
 import { countsText, shouldRecount, type StatusKind } from '../../../core/status.js'
@@ -283,26 +283,19 @@ async function memoryProject($: any, base: string, config: Config): Promise<stri
   return config.memory.project !== 'auto' ? config.memory.project : projectId(await gitRemote($, base), base)
 }
 
-interface MemoryTarget {
-  choice: MemoryChoice
-  project: string
-  where: string
-  store?: MemoryStore
+async function memoryPlace($: any, base: string, config: Config): Promise<MemoryPlace> {
+  return placeMemory(memoryOptions, {
+    openVikingServer: () => openVikingServer($),
+    cloudKey: () => $.env.get('MEM0_API_KEY'),
+    project: () => memoryProject($, base, config),
+  })
 }
 
-async function memoryTarget($: any, base: string, config: Config): Promise<MemoryTarget> {
-  const project = await memoryProject($, base, config)
-  const kind = memoryOptions.memory
-  const choice = chooseMemory({
-    options: memoryOptions,
-    project,
-    envKey: kind === 'mem0' ? await $.env.get('MEM0_API_KEY') : undefined,
-    openVikingServer: kind === 'auto' || kind === 'openviking' ? await openVikingServer($) : undefined,
-  })
-  const where = memoryWhere(choice)
-  if (choice.kind === 'openviking') return { choice, project, where, store: openVikingStore(mcpCaller($, choice.server), project) }
-  if (choice.kind === 'mem0') return { choice, project, where, store: await mem0Store($, base, choice, project) }
-  return { choice, project, where }
+async function memoryStore($: any, base: string, place: MemoryPlace): Promise<MemoryStore | undefined> {
+  const { choice, project } = place
+  if (choice.kind === 'openviking') return openVikingStore(mcpCaller($, choice.server), project)
+  if (choice.kind === 'mem0') return mem0Store($, base, choice, project)
+  return undefined
 }
 
 async function hintCloudOnce($: any, base: string, project: string, text: string): Promise<void> {
@@ -324,15 +317,17 @@ async function syncToMemory($: any, base: string, mode: SyncMode): Promise<void>
     const config = await loadConfig(io)
     const name = storeNameFor(memoryOptions)
     if (!config.enabled || !config.memory.enabled || !name) return
-    if (mode === 'fast' && (await memoryUpToDate(io, name))) return
-    const target = await memoryTarget($, base, config)
-    const block = memorySyncBlock(config, target.choice, target.project)
-    if (block || !target.store) {
-      if (block && mode === 'start' && target.choice.kind === 'mem0' && !target.choice.allowed) await hintCloudOnce($, base, target.project, block)
+    if (mode === 'fast' && ((await memoryUpToDate(io, name)) || (await memoryPaused(io, name)))) return
+    const place = await memoryPlace($, base, config)
+    const block = memorySyncBlock(config, place.choice, place.project)
+    if (block) {
+      if (mode === 'start' && place.choice.kind === 'mem0' && !place.choice.allowed) await hintCloudOnce($, base, place.project, block)
       return
     }
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: new Date().toISOString() })
-    if (outcome) await log($, base, `memory ${mode} (${target.where}, ${target.project}): ${memoryOutcomeText(outcome)}`)
+    const store = await memoryStore($, base, place)
+    if (!store) return
+    const outcome = await syncMemory({ io, store, project: place.project, mode, now: new Date().toISOString() })
+    if (outcome) await log($, base, `memory ${mode} (${place.where}, ${place.project}): ${memoryOutcomeText(outcome)}`)
   } catch (err) {
     await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
@@ -367,23 +362,25 @@ async function cloudProjectsCommand($: any, project: string, action: 'on' | 'off
 async function memoryCommand($: any, io: Io, config: Config, action: string): Promise<string> {
   try {
     if (action === 'on' || action === 'off') return await cloudProjectsCommand($, await memoryProject($, root, config), action)
-    const target = await memoryTarget($, root, config)
-    const block = memorySyncBlock(config, target.choice, target.project)
-    const place = `${target.where}, project ${target.project}`
+    const place = await memoryPlace($, root, config)
+    const block = memorySyncBlock(config, place.choice, place.project)
+    const at = `${place.where}, project ${place.project}`
     if (action === 'sync') {
-      if (block || !target.store) return block ?? place
-      const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: 'full', now: new Date().toISOString() })
-      return `Synced with ${place}: ${outcome ? memoryOutcomeText(outcome) : 'nothing to do'}.`
+      const store = block ? undefined : await memoryStore($, root, place)
+      if (!store) return block ?? at
+      const outcome = await syncMemory({ io, store, project: place.project, mode: 'full', now: new Date().toISOString() })
+      return `Synced with ${at}: ${outcome ? memoryOutcomeText(outcome) : 'nothing to do'}.`
     }
     if (action === 'clear') {
-      if (!target.store) return block ?? place
-      const removed = await clearMemory(io, target.store, target.project)
+      const store = await memoryStore($, root, place)
+      if (!store) return block ?? at
+      const removed = await clearMemory(io, store, place.project)
       return [
-        `Removed ${removed.length} Archivist items from ${place}.`,
+        `Removed ${removed.length} Archivist items from ${at}.`,
         ...(block ? [] : ['Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out.']),
       ].join(' ')
     }
-    const head = target.choice.kind === 'none' ? target.choice.why : `Memory: ${place}`
+    const head = place.choice.kind === 'none' ? place.choice.why : `Memory: ${at}`
     return [head, ...(block && block !== head ? [block] : []), ...memoryLines(await loadMemoryCaches(io))].join('\n')
   } catch (err) {
     return `Memory: ${err instanceof Error ? err.message : String(err)}`
@@ -392,9 +389,9 @@ async function memoryCommand($: any, io: Io, config: Config, action: string): Pr
 
 async function memoryNote($: any, config: Config): Promise<string | undefined> {
   try {
-    const target = await memoryTarget($, root, config)
-    if (memoryOptions.memory === 'auto' && target.choice.kind === 'none') return undefined
-    return memorySyncBlock(config, target.choice, target.project)
+    const place = await memoryPlace($, root, config)
+    if (memoryOptions.memory === 'auto' && place.choice.kind === 'none') return undefined
+    return memorySyncBlock(config, place.choice, place.project)
   } catch {
     return undefined
   }

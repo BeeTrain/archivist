@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appendLedger } from "../src/core/ledger.js";
-import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, MemoryRejected, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
+import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, memoryPaused, MemoryRejected, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
 import type { Entry } from "../src/core/types.js";
 import { entry, fakeMemoryStore, memoryIo } from "./helpers.js";
 
@@ -370,6 +370,16 @@ describe("syncMemory", () => {
     expect(outcome?.refused).toBe("mem0 rejected the request (HTTP 400): bad filter");
     expect(fake.calls).toEqual(["list"]);
     expect((await loadMemoryCache(io, "fake", project)).paused).toBe("mem0 rejected the request (HTTP 400): bad filter");
+  });
+
+  it("tells that the store in use is paused, so a fast sync has nothing to do", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.refusePut.add("gk-1");
+    expect(await memoryPaused(io, "fake")).toBe(false);
+    await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
+    expect(await memoryPaused(io, "fake")).toBe(true);
+    expect(await memoryPaused(io, "other")).toBe(false);
   });
 
   it("does not count a refused run as the day's check of memory", async () => {

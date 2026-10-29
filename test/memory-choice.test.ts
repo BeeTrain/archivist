@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { chooseMemory, cloudAllowedBy, memorySyncBlock, memoryWhere, readMemoryOptions, storeNameFor, withCloudProject, withoutCloudProject, type MemoryOptions } from "../src/core/memory-choice.js";
+import {
+  chooseMemory,
+  cloudAllowedBy,
+  memorySyncBlock,
+  memoryWhere,
+  placeMemory,
+  readMemoryOptions,
+  storeNameFor,
+  withCloudProject,
+  withoutCloudProject,
+  type MemoryLookup,
+  type MemoryOptions,
+} from "../src/core/memory-choice.js";
 import { config } from "./helpers.js";
 
 const project = "github.com/beetrain/archivist";
@@ -88,6 +100,39 @@ describe("choosing the memory", () => {
     expect(storeNameFor(options({ memory: "mem0", url: "http://localhost:8888" }))).toBe("mem0-localhost-8888");
     expect(memoryWhere(choose({ memory: "mem0", url: "http://localhost:8888" }))).toBe("mem0 at http://localhost:8888");
     expect(memoryWhere(choose({ memory: "mem0", apiKey: "k-1" }))).toBe("mem0 cloud");
+  });
+});
+
+describe("placing memory", () => {
+  const lookups = (server?: string) => {
+    const asked: string[] = [];
+    const lookup: MemoryLookup = {
+      openVikingServer: async () => (asked.push("OpenViking"), server),
+      cloudKey: async () => (asked.push("MEM0_API_KEY"), "k-env"),
+      project: async () => (asked.push("project"), project),
+    };
+    return { asked, lookup };
+  };
+
+  it("looks up nothing but the OpenViking server while none is connected", async () => {
+    const { asked, lookup } = lookups();
+    expect((await placeMemory(options(), lookup)).choice).toMatchObject({ kind: "none" });
+    expect(asked).toEqual(["OpenViking"]);
+  });
+
+  it("looks up the project once a memory is chosen", async () => {
+    const { asked, lookup } = lookups(ov);
+    expect(await placeMemory(options(), lookup)).toEqual({ choice: { kind: "openviking", server: ov }, project, where: ov });
+    expect(asked).toEqual(["OpenViking", "project"]);
+  });
+
+  it("reads MEM0_API_KEY only when the mem0 cloud is chosen", async () => {
+    const own = lookups();
+    expect((await placeMemory(options({ memory: "mem0", url: "http://localhost:8888" }), own.lookup)).choice).toMatchObject({ kind: "mem0", key: undefined });
+    expect(own.asked).toEqual(["project"]);
+    const cloud = lookups();
+    expect((await placeMemory(options({ memory: "mem0", cloudProjects: [project] }), cloud.lookup)).choice).toMatchObject({ kind: "mem0", key: "k-env", allowed: true });
+    expect(cloud.asked).toEqual(["MEM0_API_KEY", "project"]);
   });
 });
 

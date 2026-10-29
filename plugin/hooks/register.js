@@ -1100,6 +1100,7 @@ var loadMemoryCaches = async (io) => {
   return caches;
 };
 var ledgerMark = (text) => `${text.length}:${text.slice(-64)}`;
+var memoryPaused = async (io, store) => Boolean((await loadMemoryCaches(io)).find((c) => c.store === store)?.paused);
 var memoryUpToDate = async (io, store) => {
   const cache = (await loadMemoryCaches(io)).find((c) => c.store === store);
   const mark2 = ledgerMark(await io.read(PATHS.ledger) ?? "");
@@ -1596,6 +1597,16 @@ var memoryWhere = (choice) => {
   if (choice.kind === "openviking") return choice.server;
   if (choice.kind === "mem0") return choice.cloud ? "mem0 cloud" : `mem0 at ${choice.base}`;
   return "";
+};
+var placeMemory = async (options, lookup) => {
+  const openVikingServer2 = options.memory === "auto" || options.memory === "openviking" ? await lookup.openVikingServer() : void 0;
+  const envKey = options.memory === "mem0" && isMem0Cloud(options.url) ? await lookup.cloudKey() : void 0;
+  const choose = (project2) => chooseMemory({ options, project: project2, envKey, openVikingServer: openVikingServer2 });
+  const unplaced = choose("");
+  if (unplaced.kind === "none") return { choice: unplaced, project: "", where: "" };
+  const project = await lookup.project();
+  const choice = choose(project);
+  return { choice, project, where: memoryWhere(choice) };
 };
 var storeNameFor = (options) => {
   if (options.memory === "off") return void 0;
@@ -2253,19 +2264,18 @@ async function mem0Store($, base, choice, project) {
 async function memoryProject($, base, config) {
   return config.memory.project !== "auto" ? config.memory.project : projectId(await gitRemote($, base), base);
 }
-async function memoryTarget($, base, config) {
-  const project = await memoryProject($, base, config);
-  const kind = memoryOptions.memory;
-  const choice = chooseMemory({
-    options: memoryOptions,
-    project,
-    envKey: kind === "mem0" ? await $.env.get("MEM0_API_KEY") : void 0,
-    openVikingServer: kind === "auto" || kind === "openviking" ? await openVikingServer($) : void 0
+async function memoryPlace($, base, config) {
+  return placeMemory(memoryOptions, {
+    openVikingServer: () => openVikingServer($),
+    cloudKey: () => $.env.get("MEM0_API_KEY"),
+    project: () => memoryProject($, base, config)
   });
-  const where = memoryWhere(choice);
-  if (choice.kind === "openviking") return { choice, project, where, store: openVikingStore(mcpCaller($, choice.server), project) };
-  if (choice.kind === "mem0") return { choice, project, where, store: await mem0Store($, base, choice, project) };
-  return { choice, project, where };
+}
+async function memoryStore($, base, place) {
+  const { choice, project } = place;
+  if (choice.kind === "openviking") return openVikingStore(mcpCaller($, choice.server), project);
+  if (choice.kind === "mem0") return mem0Store($, base, choice, project);
+  return void 0;
 }
 async function hintCloudOnce($, base, project, text) {
   const key = CLOUD_HINT_KEY + project;
@@ -2285,15 +2295,17 @@ async function syncToMemory($, base, mode) {
     const config = await loadConfig(io);
     const name = storeNameFor(memoryOptions);
     if (!config.enabled || !config.memory.enabled || !name) return;
-    if (mode === "fast" && await memoryUpToDate(io, name)) return;
-    const target = await memoryTarget($, base, config);
-    const block = memorySyncBlock(config, target.choice, target.project);
-    if (block || !target.store) {
-      if (block && mode === "start" && target.choice.kind === "mem0" && !target.choice.allowed) await hintCloudOnce($, base, target.project, block);
+    if (mode === "fast" && (await memoryUpToDate(io, name) || await memoryPaused(io, name))) return;
+    const place = await memoryPlace($, base, config);
+    const block = memorySyncBlock(config, place.choice, place.project);
+    if (block) {
+      if (mode === "start" && place.choice.kind === "mem0" && !place.choice.allowed) await hintCloudOnce($, base, place.project, block);
       return;
     }
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: (/* @__PURE__ */ new Date()).toISOString() });
-    if (outcome) await log($, base, `memory ${mode} (${target.where}, ${target.project}): ${memoryOutcomeText(outcome)}`);
+    const store = await memoryStore($, base, place);
+    if (!store) return;
+    const outcome = await syncMemory({ io, store, project: place.project, mode, now: (/* @__PURE__ */ new Date()).toISOString() });
+    if (outcome) await log($, base, `memory ${mode} (${place.where}, ${place.project}): ${memoryOutcomeText(outcome)}`);
   } catch (err) {
     await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
@@ -2323,23 +2335,25 @@ async function cloudProjectsCommand($, project, action) {
 async function memoryCommand($, io, config, action) {
   try {
     if (action === "on" || action === "off") return await cloudProjectsCommand($, await memoryProject($, root, config), action);
-    const target = await memoryTarget($, root, config);
-    const block = memorySyncBlock(config, target.choice, target.project);
-    const place = `${target.where}, project ${target.project}`;
+    const place = await memoryPlace($, root, config);
+    const block = memorySyncBlock(config, place.choice, place.project);
+    const at = `${place.where}, project ${place.project}`;
     if (action === "sync") {
-      if (block || !target.store) return block ?? place;
-      const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() });
-      return `Synced with ${place}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
+      const store = block ? void 0 : await memoryStore($, root, place);
+      if (!store) return block ?? at;
+      const outcome = await syncMemory({ io, store, project: place.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() });
+      return `Synced with ${at}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
     }
     if (action === "clear") {
-      if (!target.store) return block ?? place;
-      const removed = await clearMemory(io, target.store, target.project);
+      const store = await memoryStore($, root, place);
+      if (!store) return block ?? at;
+      const removed = await clearMemory(io, store, place.project);
       return [
-        `Removed ${removed.length} Archivist items from ${place}.`,
+        `Removed ${removed.length} Archivist items from ${at}.`,
         ...block ? [] : ["Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out."]
       ].join(" ");
     }
-    const head2 = target.choice.kind === "none" ? target.choice.why : `Memory: ${place}`;
+    const head2 = place.choice.kind === "none" ? place.choice.why : `Memory: ${at}`;
     return [head2, ...block && block !== head2 ? [block] : [], ...memoryLines(await loadMemoryCaches(io))].join("\n");
   } catch (err) {
     return `Memory: ${err instanceof Error ? err.message : String(err)}`;
@@ -2347,9 +2361,9 @@ async function memoryCommand($, io, config, action) {
 }
 async function memoryNote($, config) {
   try {
-    const target = await memoryTarget($, root, config);
-    if (memoryOptions.memory === "auto" && target.choice.kind === "none") return void 0;
-    return memorySyncBlock(config, target.choice, target.project);
+    const place = await memoryPlace($, root, config);
+    if (memoryOptions.memory === "auto" && place.choice.kind === "none") return void 0;
+    return memorySyncBlock(config, place.choice, place.project);
   } catch {
     return void 0;
   }

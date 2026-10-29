@@ -255,6 +255,8 @@ export const loadMemoryCaches = async (io: Io): Promise<MemoryCache[]> => {
 
 export const ledgerMark = (text: string): string => `${text.length}:${text.slice(-64)}`;
 
+export const memoryPaused = async (io: Io, store: string): Promise<boolean> => Boolean((await loadMemoryCaches(io)).find((c) => c.store === store)?.paused);
+
 export const memoryUpToDate = async (io: Io, store: string): Promise<boolean> => {
   const cache = (await loadMemoryCaches(io)).find((c) => c.store === store);
   const mark = ledgerMark((await io.read(PATHS.ledger)) ?? "");

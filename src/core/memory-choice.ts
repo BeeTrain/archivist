@@ -93,6 +93,29 @@ export const memoryWhere = (choice: MemoryChoice): string => {
   return "";
 };
 
+export interface MemoryLookup {
+  openVikingServer: () => Promise<string | undefined>;
+  cloudKey: () => Promise<string | undefined>;
+  project: () => Promise<string>;
+}
+
+export interface MemoryPlace {
+  choice: MemoryChoice;
+  project: string;
+  where: string;
+}
+
+export const placeMemory = async (options: MemoryOptions, lookup: MemoryLookup): Promise<MemoryPlace> => {
+  const openVikingServer = options.memory === "auto" || options.memory === "openviking" ? await lookup.openVikingServer() : undefined;
+  const envKey = options.memory === "mem0" && isMem0Cloud(options.url) ? await lookup.cloudKey() : undefined;
+  const choose = (project: string) => chooseMemory({ options, project, envKey, openVikingServer });
+  const unplaced = choose("");
+  if (unplaced.kind === "none") return { choice: unplaced, project: "", where: "" };
+  const project = await lookup.project();
+  const choice = choose(project);
+  return { choice, project, where: memoryWhere(choice) };
+};
+
 export const storeNameFor = (options: MemoryOptions): string | undefined => {
   if (options.memory === "off") return undefined;
   return options.memory === "mem0" ? mem0StoreName(options.url) : "openviking";
