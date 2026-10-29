@@ -17,6 +17,7 @@ import { healthText, memoryLines, recallText, statsText } from '../../../core/ma
 import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryPaused, memoryUpToDate, projectId, syncMemory, type MemoryStore, type SyncMode } from '../../../core/memory.js'
 import { findOpenVikingServer, openVikingStore, type McpCall } from '../../../core/memory-openviking.js'
 import { mem0Scope } from '../../../core/mem0-scope.js'
+import { memoryLane } from '../../../core/memory-lane.js'
 import { mem0CloudStore, mem0ServerStore, mem0StoreName, mem0Transport, type Fetcher, type Mem0Auth } from '../../../core/memory-mem0.js'
 import {
   CLOUD_PROJECTS_OPTION,
@@ -98,9 +99,7 @@ let lastStatus: string | undefined
 let statusKind: StatusKind | undefined
 const ownTurns = new Set<string>()
 let memoryOptions = readMemoryOptions({})
-let memoryBusy = false
-let memoryAgain: SyncMode | undefined
-const SYNC_STRENGTH: SyncMode[] = ['fast', 'start', 'full']
+const memoryTurns = memoryLane()
 
 const newSegment = (): Segment => ({
   id: Date.now().toString(36),
@@ -307,11 +306,6 @@ async function hintCloudOnce($: any, base: string, project: string, text: string
 }
 
 async function syncToMemory($: any, base: string, mode: SyncMode): Promise<void> {
-  if (memoryBusy) {
-    memoryAgain = memoryAgain && SYNC_STRENGTH.indexOf(memoryAgain) > SYNC_STRENGTH.indexOf(mode) ? memoryAgain : mode
-    return
-  }
-  memoryBusy = true
   try {
     const io = makeIo($, base)
     const config = await loadConfig(io)
@@ -330,16 +324,11 @@ async function syncToMemory($: any, base: string, mode: SyncMode): Promise<void>
     if (outcome) await log($, base, `memory ${mode} (${place.where}, ${place.project}): ${memoryOutcomeText(outcome)}`)
   } catch (err) {
     await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`)
-  } finally {
-    memoryBusy = false
-    const again = memoryAgain
-    memoryAgain = undefined
-    if (again) await syncToMemory($, base, again)
   }
 }
 
 function syncToMemoryLater($: any, base: string, mode: SyncMode, delayMs = 0): void {
-  $.clock.after(delayMs, async () => syncToMemory($, base, mode))
+  $.clock.after(delayMs, async () => memoryTurns.sync(mode, (chosen) => syncToMemory($, base, chosen)))
 }
 
 const stillSentBy = (project: string, entry: string): string =>
@@ -368,13 +357,13 @@ async function memoryCommand($: any, io: Io, config: Config, action: string): Pr
     if (action === 'sync') {
       const store = block ? undefined : await memoryStore($, root, place)
       if (!store) return block ?? at
-      const outcome = await syncMemory({ io, store, project: place.project, mode: 'full', now: new Date().toISOString() })
+      const outcome = await memoryTurns.byHand(() => syncMemory({ io, store, project: place.project, mode: 'full', now: new Date().toISOString() }))
       return `Synced with ${at}: ${outcome ? memoryOutcomeText(outcome) : 'nothing to do'}.`
     }
     if (action === 'clear') {
       const store = await memoryStore($, root, place)
       if (!store) return block ?? at
-      const removed = await clearMemory(io, store, place.project)
+      const removed = await memoryTurns.byHand(() => clearMemory(io, store, place.project))
       return [
         `Removed ${removed.length} Archivist items from ${at}.`,
         ...(block ? [] : ['Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out.']),

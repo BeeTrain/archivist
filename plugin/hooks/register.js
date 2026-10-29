@@ -1378,6 +1378,34 @@ var mem0Scope = async (args) => {
   return { appId, agentId, userId };
 };
 
+// src/core/memory-lane.ts
+var BY_STRENGTH = ["fast", "start", "full"];
+var stronger = (a, b) => BY_STRENGTH.indexOf(a) >= BY_STRENGTH.indexOf(b) ? a : b;
+var memoryLane = () => {
+  let tail = Promise.resolve();
+  let waiting;
+  const inTurn = (work) => {
+    const turn = tail.then(work, work);
+    tail = turn.catch(() => void 0);
+    return turn;
+  };
+  return {
+    sync(mode, run) {
+      if (waiting) {
+        waiting = stronger(waiting, mode);
+        return Promise.resolve();
+      }
+      waiting = mode;
+      return inTurn(() => {
+        const chosen = waiting ?? mode;
+        waiting = void 0;
+        return run(chosen);
+      });
+    },
+    byHand: inTurn
+  };
+};
+
 // src/core/memory-mem0.ts
 var MEM0_CLOUD_URL = "https://api.mem0.ai";
 var isMem0Cloud = (address) => {
@@ -2111,9 +2139,7 @@ var lastStatus;
 var statusKind;
 var ownTurns = /* @__PURE__ */ new Set();
 var memoryOptions = readMemoryOptions({});
-var memoryBusy = false;
-var memoryAgain;
-var SYNC_STRENGTH = ["fast", "start", "full"];
+var memoryTurns = memoryLane();
 var newSegment = () => ({
   id: Date.now().toString(36),
   session,
@@ -2289,11 +2315,6 @@ async function hintCloudOnce($, base, project, text) {
   await log($, base, `memory: ${text}`);
 }
 async function syncToMemory($, base, mode) {
-  if (memoryBusy) {
-    memoryAgain = memoryAgain && SYNC_STRENGTH.indexOf(memoryAgain) > SYNC_STRENGTH.indexOf(mode) ? memoryAgain : mode;
-    return;
-  }
-  memoryBusy = true;
   try {
     const io = makeIo($, base);
     const config = await loadConfig(io);
@@ -2312,15 +2333,10 @@ async function syncToMemory($, base, mode) {
     if (outcome) await log($, base, `memory ${mode} (${place.where}, ${place.project}): ${memoryOutcomeText(outcome)}`);
   } catch (err) {
     await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    memoryBusy = false;
-    const again = memoryAgain;
-    memoryAgain = void 0;
-    if (again) await syncToMemory($, base, again);
   }
 }
 function syncToMemoryLater($, base, mode, delayMs = 0) {
-  $.clock.after(delayMs, async () => syncToMemory($, base, mode));
+  $.clock.after(delayMs, async () => memoryTurns.sync(mode, (chosen) => syncToMemory($, base, chosen)));
 }
 var stillSentBy = (project, entry) => `${project} goes to cloud memory because of ${entry} in /config (Archivist \u203A Projects sent to cloud memory): change it there.`;
 async function cloudProjectsCommand($, project, action) {
@@ -2345,13 +2361,13 @@ async function memoryCommand($, io, config, action) {
     if (action === "sync") {
       const store = block ? void 0 : await memoryStore($, root, place);
       if (!store) return block ?? at;
-      const outcome = await syncMemory({ io, store, project: place.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() });
+      const outcome = await memoryTurns.byHand(() => syncMemory({ io, store, project: place.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() }));
       return `Synced with ${at}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
     }
     if (action === "clear") {
       const store = await memoryStore($, root, place);
       if (!store) return block ?? at;
-      const removed = await clearMemory(io, store, place.project);
+      const removed = await memoryTurns.byHand(() => clearMemory(io, store, place.project));
       return [
         `Removed ${removed.length} Archivist items from ${at}.`,
         ...block ? [] : ["Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out."]
