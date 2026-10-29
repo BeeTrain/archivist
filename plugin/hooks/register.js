@@ -979,33 +979,48 @@ var readSignature = (text) => {
   const match = (text.trimEnd().split("\n").at(-1) ?? "").match(SIGNATURE);
   return match ? { project: match[1], id: match[2], updated: match[3] } : void 0;
 };
-var noOutcome = () => ({ written: [], adopted: [], removed: [], newer: [], missing: [], unknown: [], failed: [] });
+var noOutcome = () => ({ written: [], adopted: [], removed: [], duplicates: [], newer: [], missing: [], unknown: [], failed: [] });
+var copiesById = (listing) => {
+  const copies = /* @__PURE__ */ new Map();
+  for (const item of listing.items) copies.set(item.id, [...copies.get(item.id) ?? [], item]);
+  return copies;
+};
+var keeperOf = (copies, text) => copies.find((c) => c.text.trimEnd() === text.trimEnd()) ?? copies.reduce((a, b) => (readSignature(b.text)?.updated ?? "") > (readSignature(a.text)?.updated ?? "") ? b : a);
 var messageOf = (err) => err instanceof Error ? err.message : String(err);
 var reconcile = async (args) => {
   const { store, entries, stale, cache, verify } = args;
   const items = { ...cache.items };
   const outcome = noOutcome();
   const listing = verify && store.list ? await store.list() : void 0;
-  const present = listing ? new Map(listing.items.map((item) => [item.id, item])) : void 0;
+  const present = listing ? copiesById(listing) : void 0;
   const known = Boolean(store.listsText && listing && !listing.cut);
   for (const e of entries.values()) {
-    const sent = items[e.id];
+    const copies = present?.get(e.id) ?? [];
     try {
       if (e.status !== "active") {
-        const ref2 = sent?.ref ?? present?.get(e.id)?.ref;
-        if (!ref2) continue;
-        await store.remove(ref2);
+        const refs = new Set([items[e.id]?.ref, ...copies.map((c) => c.ref)].filter((ref2) => Boolean(ref2)));
+        if (!refs.size) continue;
+        for (const ref2 of refs) await store.remove(ref2);
         delete items[e.id];
         outcome.removed.push(e.id);
         continue;
       }
       if (stale.has(e.id)) continue;
       const text = renderItem(e, cache.project);
+      let listed = copies[0];
+      if (copies.length > 1 && copies.every((c) => c.text !== void 0)) {
+        listed = keeperOf(copies, text);
+        for (const copy of copies.filter((c) => c !== listed)) {
+          await store.remove(copy.ref);
+          outcome.duplicates.push(e.id);
+          if (items[e.id]?.ref === copy.ref) delete items[e.id];
+        }
+      }
+      const sent = items[e.id];
       if (sent?.text === text) {
         if (present && !present.has(e.id)) outcome.missing.push(e.id);
         continue;
       }
-      const listed = present?.get(e.id);
       const remote = listed?.text !== void 0 ? { ref: listed.ref, text: listed.text } : known ? void 0 : await store.fetch?.(e.id, sent?.ref ?? listed?.ref);
       const remoteUpdated = remote ? readSignature(remote.text)?.updated : void 0;
       if (remoteUpdated && remoteUpdated > e.updated) {
@@ -1034,6 +1049,7 @@ var memoryOutcomeText = (outcome) => {
     [outcome.written.length, "written"],
     [outcome.adopted.length, "already there"],
     [outcome.removed.length, "removed"],
+    [outcome.duplicates.length, "duplicates removed"],
     [outcome.newer.length, "newer in memory"],
     [outcome.missing.length, "gone from memory"],
     [outcome.unknown.length, "unknown to this ledger"],

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appendLedger } from "../src/core/ledger.js";
-import { clearMemory, loadMemoryCache, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
+import { clearMemory, loadMemoryCache, memoryOutcomeText, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
 import type { Entry } from "../src/core/types.js";
 import { entry, fakeMemoryStore, memoryIo } from "./helpers.js";
 
@@ -197,6 +197,52 @@ describe("reconcile", () => {
     const fake = fakeMemoryStore(project, {}, { cut: true });
     const { cache } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
     expect(cache.listCut).toBe(true);
+  });
+
+  it("keeps the copy that matches the ledger and removes the other copies", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    fake.items.set(`${fake.refOf("gk-1")}#3`, renderItem({ ...gotcha, content: "An older wording", updated: "2026-10-22T10:00:00.000Z" }, project));
+    const { cache, outcome } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(outcome.duplicates).toEqual(["gk-1", "gk-1"]);
+    expect([...fake.items.keys()]).toEqual([fake.refOf("gk-1")]);
+    expect(cache.items["gk-1"]?.ref).toBe(fake.refOf("gk-1"));
+    expect(memoryOutcomeText(outcome)).toContain("2 duplicates removed");
+  });
+
+  it("keeps the newest copy when none matches the ledger", async () => {
+    const newer = renderItem({ ...gotcha, content: "Ahead in another clone", updated: later }, project);
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem({ ...gotcha, content: "Old", updated: "2026-10-22T10:00:00.000Z" }, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, newer);
+    const { outcome } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(outcome.duplicates).toEqual(["gk-1"]);
+    expect(outcome.newer).toEqual(["gk-1"]);
+    expect([...fake.items.values()]).toEqual([newer]);
+  });
+
+  it("removes every copy of a retired entry", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    const { outcome } = await sync(fake, ledger({ ...gotcha, status: "deprecated", updated: later }), emptyCache(), new Set(), true);
+    expect(outcome.removed).toEqual(["gk-1"]);
+    expect(fake.items.size).toBe(0);
+  });
+
+  it("leaves copies alone when the listing has no text to choose by", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    const { outcome } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(outcome.duplicates).toEqual([]);
+    expect(fake.items.size).toBe(2);
+  });
+
+  it("forgets the ref it sent when that copy was the duplicate it removed", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    const sentThere: MemoryCache = { ...emptyCache(), items: { "gk-1": { ref: `${fake.refOf("gk-1")}#2`, text: renderItem(gotcha, project), updated: ts } } };
+    const { cache, outcome } = await sync(fake, ledger(gotcha), sentThere, new Set(), true);
+    expect(outcome.duplicates).toEqual(["gk-1"]);
+    expect(cache.items["gk-1"]?.ref).toBe(fake.refOf("gk-1"));
   });
 });
 
