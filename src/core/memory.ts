@@ -4,6 +4,8 @@ import { withLock } from "./lock.js";
 import { findStale } from "./render.js";
 import type { Entry, EntryType } from "./types.js";
 
+export class MemoryRefused extends Error {}
+
 export interface MemoryItem {
   ref: string;
   id: string;
@@ -39,6 +41,7 @@ export interface MemoryCache {
   lastSync?: string;
   lastVerify?: string;
   lastError?: string;
+  paused?: string;
   missing?: string[];
   unknown?: string[];
   listCut?: boolean;
@@ -53,6 +56,7 @@ export interface SyncOutcome {
   missing: string[];
   unknown: string[];
   failed: { id: string; error: string }[];
+  refused?: string;
 }
 
 export interface Signature {
@@ -139,7 +143,13 @@ export const reconcile = async (args: {
   const { store, entries, stale, cache, verify } = args;
   const items = { ...cache.items };
   const outcome = noOutcome();
-  const listing = verify && store.list ? await store.list() : undefined;
+  let listing: MemoryListing | undefined;
+  try {
+    listing = verify && store.list ? await store.list() : undefined;
+  } catch (err) {
+    if (err instanceof MemoryRefused) return { cache, outcome: { ...outcome, refused: err.message } };
+    throw err;
+  }
   const present = listing ? copiesById(listing) : undefined;
   const known = Boolean(store.listsText && listing && !listing.cut);
   for (const e of entries.values()) {
@@ -184,6 +194,10 @@ export const reconcile = async (args: {
       items[e.id] = { ref, text, updated: e.updated };
       outcome.written.push(e.id);
     } catch (err) {
+      if (err instanceof MemoryRefused) {
+        outcome.refused = err.message;
+        break;
+      }
       outcome.failed.push({ id: e.id, error: messageOf(err) });
     }
   }
@@ -204,7 +218,8 @@ export const memoryOutcomeText = (outcome: SyncOutcome): string => {
   ];
   const said = counts.filter(([n]) => n).map(([n, what]) => `${n} ${what}`);
   const firstFailure = outcome.failed[0];
-  return said.length ? `${said.join(", ")}${firstFailure ? ` (${firstFailure.id}: ${firstFailure.error})` : ""}` : "nothing to do";
+  const text = said.length ? `${said.join(", ")}${firstFailure ? ` (${firstFailure.id}: ${firstFailure.error})` : ""}` : "nothing to do";
+  return outcome.refused ? `${text}; stopped: ${outcome.refused}` : text;
 };
 
 export const memoryCachePath = (store: string): string => `.archivist/.local/memory-${store}.json`;
@@ -271,12 +286,20 @@ export const syncMemory = async (args: { io: Io; store: MemoryStore; project: st
   const ledgerText = (await io.read(PATHS.ledger)) ?? "";
   const mark = ledgerMark(ledgerText);
   const cache = await loadMemoryCache(io, store.name, project);
+  if (mode === "fast" && cache.paused) return undefined;
   const verify = verifies(mode, cache, store, now);
   if (!verify && cache.ledgerMark === mark && !cache.lastError) return undefined;
   const entries = foldLedger(parseLedger(ledgerText).records);
   const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify });
   const failure = outcome.failed[0];
-  const saved: MemoryCache = { ...next, ledgerMark: mark, lastSync: now, ...(verify ? { lastVerify: now } : {}), lastError: failure ? `${failure.id}: ${failure.error}` : undefined };
+  const saved: MemoryCache = {
+    ...next,
+    ledgerMark: mark,
+    lastSync: now,
+    ...(verify && !outcome.refused ? { lastVerify: now } : {}),
+    lastError: outcome.refused ?? (failure ? `${failure.id}: ${failure.error}` : undefined),
+    paused: outcome.refused,
+  };
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
   return outcome;
 };

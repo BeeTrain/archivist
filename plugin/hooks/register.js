@@ -941,6 +941,8 @@ var expireProposals = async (io, config, now) => {
 };
 
 // src/core/memory.ts
+var MemoryRefused = class extends Error {
+};
 var segment = (s) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 var localProject = (path) => `local/${segment(path.replace(/\.git$/, "").split("/").filter(Boolean).at(-1) ?? "project") || "project"}`;
 var hostAndPath = (remote) => {
@@ -991,7 +993,13 @@ var reconcile = async (args) => {
   const { store, entries, stale, cache, verify } = args;
   const items = { ...cache.items };
   const outcome = noOutcome();
-  const listing = verify && store.list ? await store.list() : void 0;
+  let listing;
+  try {
+    listing = verify && store.list ? await store.list() : void 0;
+  } catch (err) {
+    if (err instanceof MemoryRefused) return { cache, outcome: { ...outcome, refused: err.message } };
+    throw err;
+  }
   const present = listing ? copiesById(listing) : void 0;
   const known = Boolean(store.listsText && listing && !listing.cut);
   for (const e of entries.values()) {
@@ -1036,6 +1044,10 @@ var reconcile = async (args) => {
       items[e.id] = { ref, text, updated: e.updated };
       outcome.written.push(e.id);
     } catch (err) {
+      if (err instanceof MemoryRefused) {
+        outcome.refused = err.message;
+        break;
+      }
       outcome.failed.push({ id: e.id, error: messageOf(err) });
     }
   }
@@ -1057,7 +1069,8 @@ var memoryOutcomeText = (outcome) => {
   ];
   const said = counts.filter(([n]) => n).map(([n, what]) => `${n} ${what}`);
   const firstFailure = outcome.failed[0];
-  return said.length ? `${said.join(", ")}${firstFailure ? ` (${firstFailure.id}: ${firstFailure.error})` : ""}` : "nothing to do";
+  const text = said.length ? `${said.join(", ")}${firstFailure ? ` (${firstFailure.id}: ${firstFailure.error})` : ""}` : "nothing to do";
+  return outcome.refused ? `${text}; stopped: ${outcome.refused}` : text;
 };
 var memoryCachePath = (store) => `.archivist/.local/memory-${store}.json`;
 var loadMemoryCache = async (io, store, project) => {
@@ -1113,12 +1126,20 @@ var syncMemory = async (args) => {
   const ledgerText = await io.read(PATHS.ledger) ?? "";
   const mark2 = ledgerMark(ledgerText);
   const cache = await loadMemoryCache(io, store.name, project);
+  if (mode === "fast" && cache.paused) return void 0;
   const verify = verifies(mode, cache, store, now);
   if (!verify && cache.ledgerMark === mark2 && !cache.lastError) return void 0;
   const entries = foldLedger(parseLedger(ledgerText).records);
   const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify });
   const failure = outcome.failed[0];
-  const saved = { ...next, ledgerMark: mark2, lastSync: now, ...verify ? { lastVerify: now } : {}, lastError: failure ? `${failure.id}: ${failure.error}` : void 0 };
+  const saved = {
+    ...next,
+    ledgerMark: mark2,
+    lastSync: now,
+    ...verify && !outcome.refused ? { lastVerify: now } : {},
+    lastError: outcome.refused ?? (failure ? `${failure.id}: ${failure.error}` : void 0),
+    paused: outcome.refused
+  };
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
   return outcome;
 };
@@ -1194,7 +1215,7 @@ var memoryLines = (memories) => memories.flatMap((m) => [
   ...m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : [],
   ...m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : [],
   ...m.listCut ? ["- memory listed as many items as it gives at once: the counts above may be short"] : [],
-  ...m.lastError ? [`- last error: ${m.lastError}`] : []
+  ...m.paused ? [`- paused until the next session or /archivist memory sync: ${m.paused}`] : m.lastError ? [`- last error: ${m.lastError}`] : []
 ]);
 var healthText = async (io, entries, config, now, extras = {}) => {
   const since = new Date(now.getTime() - WEEK).toISOString();

@@ -244,6 +244,18 @@ describe("reconcile", () => {
     expect(outcome.duplicates).toEqual(["gk-1"]);
     expect(cache.items["gk-1"]?.ref).toBe(fake.refOf("gk-1"));
   });
+
+  it("stops at a refusal, keeps what it sent before it, and says why", async () => {
+    const fake = fakeMemoryStore(project);
+    fake.refusePut.add("cmd-1");
+    const procedure = entry({ id: "proc-1", type: "procedure", title: "Release", content: "1. npm run check", created: ts, updated: ts });
+    const { cache, outcome } = await sync(fake, ledger(gotcha, command, procedure));
+    expect(outcome.written).toEqual(["gk-1"]);
+    expect(outcome.refused).toBe("mem0 refused the request (HTTP 401): Invalid API key");
+    expect(fake.calls).not.toContain("fetch proc-1");
+    expect(cache.items["gk-1"]).toBeDefined();
+    expect(memoryOutcomeText(outcome)).toContain("stopped: mem0 refused the request (HTTP 401)");
+  });
 });
 
 describe("syncMemory", () => {
@@ -316,6 +328,31 @@ describe("syncMemory", () => {
     expect(fake.calls).toContain("list");
     fake.calls.length = 0;
     await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-24T22:00:00.000Z" });
+    expect(fake.calls).toContain("list");
+  });
+
+  it("pauses after a refusal until the next session start or a sync by hand", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.refusePut.add("gk-1");
+    expect((await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts }))?.refused).toBeDefined();
+    fake.calls.length = 0;
+    await appendLedger(io, [{ v: 1, ts: later, op: "add", entry: command }]);
+    expect(await syncMemory({ io, store: fake.store, project, mode: "fast", now: later })).toBeUndefined();
+    expect(fake.calls).toEqual([]);
+    fake.refusePut.clear();
+    expect((await syncMemory({ io, store: fake.store, project, mode: "start", now: later }))?.written.sort()).toEqual(["cmd-1", "gk-1"]);
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBeUndefined();
+  });
+
+  it("does not count a refused run as the day's check of memory", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project, {}, { readsCostQuota: true });
+    fake.refusePut.add("gk-1");
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T10:00:00.000Z" });
+    fake.refusePut.clear();
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T11:00:00.000Z" });
     expect(fake.calls).toContain("list");
   });
 

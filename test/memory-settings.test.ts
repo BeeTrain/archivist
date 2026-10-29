@@ -68,6 +68,17 @@ describe("health of the memory projection", () => {
     expect(memory).toContain("memory listed as many items as it gives at once: the counts above may be short");
   });
 
+  it("says sync is paused after memory refused the key, in place of the last error", async () => {
+    const io = memoryIo();
+    await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);
+    const refusal = "mem0 refused the request (HTTP 401): Invalid API key";
+    io.files.set(memoryCachePath("mem0"), JSON.stringify({ store: "mem0", project: "github.com/beetrain/archivist", items: {}, lastSync: day(0), lastError: refusal, paused: refusal }));
+    const text = await healthText(io, (await loadState(io)).entries, config(), now);
+    const memory = text.split("## Memory\n")[1]!.split("\n\n")[0]!;
+    expect(memory).toContain("paused until the next session or /archivist memory sync: mem0 refused the request (HTTP 401)");
+    expect(memory).not.toContain("last error:");
+  });
+
   it("shows the mod's note about memory even before anything was sent", async () => {
     const io = memoryIo();
     await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);

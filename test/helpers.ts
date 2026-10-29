@@ -1,6 +1,6 @@
 import { DEFAULT_CONFIG, type Config } from "../src/core/config.js";
 import type { Io } from "../src/core/io.js";
-import type { MemoryStore, Signature } from "../src/core/memory.js";
+import { MemoryRefused, type MemoryStore, type Signature } from "../src/core/memory.js";
 import type { Entry, Segment, ToolEvent } from "../src/core/types.js";
 
 /** In-memory Io. Directories are implied by files; `dirs` adds empty ones (left behind by an earlier version). */
@@ -53,6 +53,7 @@ export const fakeMemoryStore = (project: string, seed: Record<string, string> = 
   const items = new Map(Object.entries(seed).map(([id, text]) => [refOf(id), text]));
   const calls: string[] = [];
   const failPut = new Set<string>();
+  const refusePut = new Set<string>();
   const signatures: Signature[] = [];
   const store: MemoryStore = {
     name: "fake",
@@ -62,6 +63,7 @@ export const fakeMemoryStore = (project: string, seed: Record<string, string> = 
       calls.push(`put ${id}`);
       signatures.push(signature);
       if (failPut.has(id)) throw new Error("server down");
+      if (refusePut.has(id)) throw new MemoryRefused("mem0 refused the request (HTTP 401): Invalid API key");
       items.set(refOf(id), text);
       return refOf(id);
     },
@@ -80,7 +82,7 @@ export const fakeMemoryStore = (project: string, seed: Record<string, string> = 
       return options.cut ? { items: listed, cut: true } : { items: listed };
     },
   };
-  return { store, items, calls, failPut, refOf, signatures };
+  return { store, items, calls, failPut, refusePut, refOf, signatures };
 };
 
 export const segment = (tools: ToolEvent[], prompts = ["fix the export"]): Segment => ({
