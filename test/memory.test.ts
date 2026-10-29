@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appendLedger } from "../src/core/ledger.js";
-import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, memoryPaused, MemoryRejected, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
+import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, memoryPaused, MemoryRefused, MemoryRejected, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
 import type { Entry } from "../src/core/types.js";
 import { entry, fakeMemoryStore, memoryIo } from "./helpers.js";
 
@@ -360,6 +360,16 @@ describe("syncMemory", () => {
     expect(fake.calls).toEqual([]);
     fake.rejectPut.clear();
     expect((await syncMemory({ io, store: fake.store, project, mode: "start", now: later }))?.written.sort()).toEqual(["gk-1", "proc-1"]);
+  });
+
+  it("stops at a refusal while listing and waits for the next session", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.listErrors.push(new MemoryRefused("mem0 refused the request (HTTP 429): quota"));
+    const outcome = await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    expect(outcome?.refused).toBe("mem0 refused the request (HTTP 429): quota");
+    expect(fake.calls).toEqual(["list"]);
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBe("mem0 refused the request (HTTP 429): quota");
   });
 
   it("stops and waits for the next session when memory turns down its listing", async () => {

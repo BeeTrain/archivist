@@ -100,6 +100,11 @@ describe("the mem0 cloud store", () => {
     expect(await mem0CloudStore(http, scope, project).put("gk-1", "# New\n", "uuid-1", signature)).toBe("uuid-2");
   });
 
+  it("stops when mem0 refuses to delete the old version", async () => {
+    const { http } = fakeHttp([json(200, { results: [{ id: "uuid-2" }] }), json(429, { detail: "quota" })]);
+    await expect(mem0CloudStore(http, scope, project).put("gk-1", "# New\n", "uuid-1", signature)).rejects.toBeInstanceOf(MemoryRefused);
+  });
+
   it("does not delete the item it just added when mem0 answers with the same id", async () => {
     const { calls, http } = fakeHttp([json(200, { results: [{ id: "uuid-1" }] })]);
     expect(await mem0CloudStore(http, scope, project).put("gk-1", "# New\n", "uuid-1", signature)).toBe("uuid-1");
