@@ -46,7 +46,7 @@ export const entry = (over: Partial<Entry> & Pick<Entry, "id" | "type" | "title"
   ...over,
 });
 
-export const fakeMemoryStore = (project: string, seed: Record<string, string> = {}, options: { listsText?: boolean; cut?: boolean } = {}) => {
+export const fakeMemoryStore = (project: string, seed: Record<string, string> = {}, options: { listsText?: boolean; cut?: boolean; readsCostQuota?: boolean } = {}) => {
   const prefix = `fake://${project}/`;
   const refOf = (id: string) => `${prefix}${id}.md`;
   const idOf = (ref: string) => ref.slice(prefix.length).replace(/\.md(#\d+)?$/, "");
@@ -57,6 +57,7 @@ export const fakeMemoryStore = (project: string, seed: Record<string, string> = 
   const store: MemoryStore = {
     name: "fake",
     ...(options.listsText ? { listsText: true } : {}),
+    ...(options.readsCostQuota ? { readsCostQuota: true } : {}),
     async put(id, text, _ref, signature) {
       calls.push(`put ${id}`);
       signatures.push(signature);

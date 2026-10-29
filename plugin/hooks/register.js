@@ -1084,10 +1084,10 @@ var loadMemoryCaches = async (io) => {
   return caches;
 };
 var ledgerMark = (text) => `${text.length}:${text.slice(-64)}`;
-var memoryUpToDate = async (io) => {
-  const caches = await loadMemoryCaches(io);
+var memoryUpToDate = async (io, store) => {
+  const cache = (await loadMemoryCaches(io)).find((c) => c.store === store);
   const mark2 = ledgerMark(await io.read(PATHS.ledger) ?? "");
-  return caches.length > 0 && caches.every((cache) => cache.ledgerMark === mark2 && !cache.lastError);
+  return cache !== void 0 && cache.ledgerMark === mark2 && !cache.lastError;
 };
 var clearMemory = async (io, store, project) => {
   const removed = [];
@@ -1101,17 +1101,24 @@ var clearMemory = async (io, store, project) => {
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(forgotten, null, 1) + "\n"));
   return removed;
 };
+var VERIFY_INTERVAL_MS = 864e5;
+var verifies = (mode, cache, store, now) => {
+  if (mode === "full" || !cache.lastSync) return true;
+  if (mode === "fast") return false;
+  const verifiedRecently = cache.lastVerify !== void 0 && Date.parse(now) - Date.parse(cache.lastVerify) < VERIFY_INTERVAL_MS;
+  return !store.readsCostQuota || !verifiedRecently;
+};
 var syncMemory = async (args) => {
   const { io, store, project, mode, now } = args;
   const ledgerText = await io.read(PATHS.ledger) ?? "";
   const mark2 = ledgerMark(ledgerText);
   const cache = await loadMemoryCache(io, store.name, project);
-  const firstSync = !cache.lastSync;
-  if (mode === "fast" && !firstSync && cache.ledgerMark === mark2 && !cache.lastError) return void 0;
+  const verify = verifies(mode, cache, store, now);
+  if (!verify && cache.ledgerMark === mark2 && !cache.lastError) return void 0;
   const entries = foldLedger(parseLedger(ledgerText).records);
-  const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify: mode === "verify" || firstSync });
+  const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify });
   const failure = outcome.failed[0];
-  const saved = { ...next, ledgerMark: mark2, lastSync: now, lastError: failure ? `${failure.id}: ${failure.error}` : void 0 };
+  const saved = { ...next, ledgerMark: mark2, lastSync: now, ...verify ? { lastVerify: now } : {}, lastError: failure ? `${failure.id}: ${failure.error}` : void 0 };
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
   return outcome;
 };
@@ -1235,7 +1242,7 @@ var healthText = async (io, entries, config, now, extras = {}) => {
     ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
   ];
   const memories = await loadMemoryCaches(io);
-  if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
+  if (memories.length || extras.memoryNote) lines.push("", "## Memory", ...extras.memoryNote ? [`- ${extras.memoryNote}`] : [], ...memoryLines(memories));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
   const todo = [];
   if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
@@ -1790,6 +1797,7 @@ var statusKind;
 var ownTurns = /* @__PURE__ */ new Set();
 var memoryBusy = false;
 var memoryAgain;
+var SYNC_STRENGTH = ["fast", "start", "full"];
 var newSegment = () => ({
   id: Date.now().toString(36),
   session,
@@ -1915,7 +1923,7 @@ async function memoryTarget($, base, config) {
 }
 async function syncToMemory($, base, mode) {
   if (memoryBusy) {
-    memoryAgain = mode === "verify" || memoryAgain === "verify" ? "verify" : "fast";
+    memoryAgain = memoryAgain && SYNC_STRENGTH.indexOf(memoryAgain) > SYNC_STRENGTH.indexOf(mode) ? memoryAgain : mode;
     return;
   }
   memoryBusy = true;
@@ -1923,7 +1931,7 @@ async function syncToMemory($, base, mode) {
     const io = makeIo($, base);
     const config = await loadConfig(io);
     if (!config.enabled || !config.memory.enabled) return;
-    if (mode === "fast" && await memoryUpToDate(io)) return;
+    if (mode === "fast" && await memoryUpToDate(io, "openviking")) return;
     const target = await memoryTarget($, base, config);
     if (!target) return;
     const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: (/* @__PURE__ */ new Date()).toISOString() });
@@ -1947,7 +1955,7 @@ async function memoryCommand($, io, config, action) {
   if (action === "sync") {
     if (!syncOn) return "Memory sync is off: set memory.enabled to true in .archivist/config.json.";
     if (!target) return NO_MEMORY;
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: "verify", now: (/* @__PURE__ */ new Date()).toISOString() });
+    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() });
     return `Synced with ${where}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
   }
   if (action === "clear") {
@@ -2070,7 +2078,7 @@ function register(on) {
       });
     }
     await refreshStatus($, makeIo($, root));
-    syncToMemoryLater($, root, "verify", MEMORY_CHECK_AFTER_START_MS);
+    syncToMemoryLater($, root, "start", MEMORY_CHECK_AFTER_START_MS);
     return next(e);
   }).catch(($, e, next) => next(e));
   on("session.attach", async ($, e, next) => {

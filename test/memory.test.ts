@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appendLedger } from "../src/core/ledger.js";
-import { clearMemory, loadMemoryCache, memoryOutcomeText, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
+import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
 import type { Entry } from "../src/core/types.js";
 import { entry, fakeMemoryStore, memoryIo } from "./helpers.js";
 
@@ -286,14 +286,46 @@ describe("syncMemory", () => {
   it("knows memory is up to date until the ledger changes or a sync failed", async () => {
     const io = await withLedger(gotcha);
     const fake = fakeMemoryStore(project);
-    expect(await memoryUpToDate(io)).toBe(false);
+    expect(await memoryUpToDate(io, "fake")).toBe(false);
     await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
-    expect(await memoryUpToDate(io)).toBe(true);
+    expect(await memoryUpToDate(io, "fake")).toBe(true);
     await appendLedger(io, [{ v: 1, ts: later, op: "add", entry: command }]);
-    expect(await memoryUpToDate(io)).toBe(false);
+    expect(await memoryUpToDate(io, "fake")).toBe(false);
     fake.failPut.add("cmd-1");
     await syncMemory({ io, store: fake.store, project, mode: "fast", now: later });
-    expect(await memoryUpToDate(io)).toBe(false);
+    expect(await memoryUpToDate(io, "fake")).toBe(false);
+  });
+
+  it("checks memory at every session start when reading it is free", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: later });
+    expect(fake.calls).toContain("list");
+  });
+
+  it("checks memory whose reads cost quota at most once a day, unless asked by hand", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project, {}, { readsCostQuota: true });
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T10:00:00.000Z" });
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T20:00:00.000Z" });
+    expect(fake.calls).toEqual([]);
+    await syncMemory({ io, store: fake.store, project, mode: "full", now: "2026-10-23T21:00:00.000Z" });
+    expect(fake.calls).toContain("list");
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-24T22:00:00.000Z" });
+    expect(fake.calls).toContain("list");
+  });
+
+  it("tells whether memory is up to date from the store in use only", async () => {
+    const io = await withLedger(gotcha);
+    io.files.set(memoryCachePath("old"), JSON.stringify({ store: "old", project, items: {}, ledgerMark: "stale" }));
+    const fake = fakeMemoryStore(project);
+    await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
+    expect(await memoryUpToDate(io, "fake")).toBe(true);
+    expect(await memoryUpToDate(io, "old")).toBe(false);
   });
 
   it("clears this project's Archivist items, leaves what a person put there, and forgets what it sent", async () => {

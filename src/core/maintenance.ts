@@ -111,6 +111,7 @@ export const lint = async (io: Io, entries: Map<string, Entry>, config: Config):
 export interface HealthExtras {
   log?: string[];
   spentToday?: number;
+  memoryNote?: string;
 }
 
 const WEEK = 7 * 86_400_000;
@@ -180,7 +181,7 @@ export const healthText = async (io: Io, entries: Map<string, Entry>, config: Co
     ...(wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []),
   ];
   const memories = await loadMemoryCaches(io);
-  if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
+  if (memories.length || extras.memoryNote) lines.push("", "## Memory", ...(extras.memoryNote ? [`- ${extras.memoryNote}`] : []), ...memoryLines(memories));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...(warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []));
 
   const todo: string[] = [];

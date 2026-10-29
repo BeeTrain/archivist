@@ -68,6 +68,14 @@ describe("health of the memory projection", () => {
     expect(memory).toContain("memory listed as many items as it gives at once: the counts above may be short");
   });
 
+  it("shows the mod's note about memory even before anything was sent", async () => {
+    const io = memoryIo();
+    await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);
+    const note = "mem0 cloud is chosen, but github.com/beetrain/archivist is not sent there: /archivist memory on sends it.";
+    const text = await healthText(io, (await loadState(io)).entries, config(), now, { memoryNote: note });
+    expect(text.split("## Memory\n")[1]).toContain(note);
+  });
+
   it("warns when rule files are off and nothing reaches a memory", async () => {
     const io = memoryIo();
     await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);

@@ -1183,7 +1183,7 @@ var healthText = async (io, entries, config, now2, extras = {}) => {
     ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
   ];
   const memories = await loadMemoryCaches(io);
-  if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
+  if (memories.length || extras.memoryNote) lines.push("", "## Memory", ...extras.memoryNote ? [`- ${extras.memoryNote}`] : [], ...memoryLines(memories));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
   const todo = [];
   if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);

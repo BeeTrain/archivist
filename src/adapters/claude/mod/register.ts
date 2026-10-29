@@ -14,7 +14,7 @@ import { isExcluded, redact } from '../../../core/privacy.js'
 import { applyProposals, deprecateEntry, describeOp, editEntry, editFromOptions, listProposals, pick, reviewText, skipProposals } from '../../../core/review.js'
 import { parseOptions, splitArgs } from '../../../core/args.js'
 import { healthText, memoryLines, recallText, statsText } from '../../../core/maintenance.js'
-import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryUpToDate, projectId, syncMemory, type MemoryStore } from '../../../core/memory.js'
+import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryUpToDate, projectId, syncMemory, type MemoryStore, type SyncMode } from '../../../core/memory.js'
 import { findOpenVikingServer, openVikingStore, type McpCall } from '../../../core/memory-openviking.js'
 import { logKey, withLine } from '../../../core/log.js'
 import { countsText, shouldRecount, type StatusKind } from '../../../core/status.js'
@@ -84,7 +84,8 @@ let lastStatus: string | undefined
 let statusKind: StatusKind | undefined
 const ownTurns = new Set<string>()
 let memoryBusy = false
-let memoryAgain: 'fast' | 'verify' | undefined
+let memoryAgain: SyncMode | undefined
+const SYNC_STRENGTH: SyncMode[] = ['fast', 'start', 'full']
 
 const newSegment = (): Segment => ({
   id: Date.now().toString(36),
@@ -227,9 +228,9 @@ async function memoryTarget($: any, base: string, config: Config): Promise<{ ser
   return { server, project, store: openVikingStore(mcpCaller($, server), project) }
 }
 
-async function syncToMemory($: any, base: string, mode: 'fast' | 'verify'): Promise<void> {
+async function syncToMemory($: any, base: string, mode: SyncMode): Promise<void> {
   if (memoryBusy) {
-    memoryAgain = mode === 'verify' || memoryAgain === 'verify' ? 'verify' : 'fast'
+    memoryAgain = memoryAgain && SYNC_STRENGTH.indexOf(memoryAgain) > SYNC_STRENGTH.indexOf(mode) ? memoryAgain : mode
     return
   }
   memoryBusy = true
@@ -237,7 +238,7 @@ async function syncToMemory($: any, base: string, mode: 'fast' | 'verify'): Prom
     const io = makeIo($, base)
     const config = await loadConfig(io)
     if (!config.enabled || !config.memory.enabled) return
-    if (mode === 'fast' && (await memoryUpToDate(io))) return
+    if (mode === 'fast' && (await memoryUpToDate(io, 'openviking'))) return
     const target = await memoryTarget($, base, config)
     if (!target) return
     const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: new Date().toISOString() })
@@ -252,7 +253,7 @@ async function syncToMemory($: any, base: string, mode: 'fast' | 'verify'): Prom
   }
 }
 
-function syncToMemoryLater($: any, base: string, mode: 'fast' | 'verify', delayMs = 0): void {
+function syncToMemoryLater($: any, base: string, mode: SyncMode, delayMs = 0): void {
   $.clock.after(delayMs, async () => syncToMemory($, base, mode))
 }
 
@@ -263,7 +264,7 @@ async function memoryCommand($: any, io: Io, config: Config, action: string): Pr
   if (action === 'sync') {
     if (!syncOn) return 'Memory sync is off: set memory.enabled to true in .archivist/config.json.'
     if (!target) return NO_MEMORY
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: 'verify', now: new Date().toISOString() })
+    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: 'full', now: new Date().toISOString() })
     return `Synced with ${where}: ${outcome ? memoryOutcomeText(outcome) : 'nothing to do'}.`
   }
   if (action === 'clear') {
@@ -398,7 +399,7 @@ export function register(on: On): void {
       })
     }
     await refreshStatus($, makeIo($, root))
-    syncToMemoryLater($, root, 'verify', MEMORY_CHECK_AFTER_START_MS)
+    syncToMemoryLater($, root, 'start', MEMORY_CHECK_AFTER_START_MS)
     return next(e)
   }).catch(($, e, next) => next(e))
 

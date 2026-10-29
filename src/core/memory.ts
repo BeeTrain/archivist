@@ -18,6 +18,7 @@ export interface MemoryListing {
 export interface MemoryStore {
   name: string;
   listsText?: boolean;
+  readsCostQuota?: boolean;
   put(id: string, text: string, ref: string | undefined, signature: Signature): Promise<string>;
   remove(ref: string): Promise<void>;
   fetch?(id: string, ref?: string): Promise<{ ref: string; text: string } | undefined>;
@@ -36,6 +37,7 @@ export interface MemoryCache {
   items: Record<string, SentItem>;
   ledgerMark?: string;
   lastSync?: string;
+  lastVerify?: string;
   lastError?: string;
   missing?: string[];
   unknown?: string[];
@@ -234,10 +236,10 @@ export const loadMemoryCaches = async (io: Io): Promise<MemoryCache[]> => {
 
 export const ledgerMark = (text: string): string => `${text.length}:${text.slice(-64)}`;
 
-export const memoryUpToDate = async (io: Io): Promise<boolean> => {
-  const caches = await loadMemoryCaches(io);
+export const memoryUpToDate = async (io: Io, store: string): Promise<boolean> => {
+  const cache = (await loadMemoryCaches(io)).find((c) => c.store === store);
   const mark = ledgerMark((await io.read(PATHS.ledger)) ?? "");
-  return caches.length > 0 && caches.every((cache) => cache.ledgerMark === mark && !cache.lastError);
+  return cache !== undefined && cache.ledgerMark === mark && !cache.lastError;
 };
 
 export const clearMemory = async (io: Io, store: MemoryStore, project: string): Promise<string[]> => {
@@ -253,17 +255,28 @@ export const clearMemory = async (io: Io, store: MemoryStore, project: string): 
   return removed;
 };
 
-export const syncMemory = async (args: { io: Io; store: MemoryStore; project: string; mode: "fast" | "verify"; now: string }): Promise<SyncOutcome | undefined> => {
+export type SyncMode = "fast" | "start" | "full";
+
+export const VERIFY_INTERVAL_MS = 86_400_000;
+
+const verifies = (mode: SyncMode, cache: MemoryCache, store: MemoryStore, now: string): boolean => {
+  if (mode === "full" || !cache.lastSync) return true;
+  if (mode === "fast") return false;
+  const verifiedRecently = cache.lastVerify !== undefined && Date.parse(now) - Date.parse(cache.lastVerify) < VERIFY_INTERVAL_MS;
+  return !store.readsCostQuota || !verifiedRecently;
+};
+
+export const syncMemory = async (args: { io: Io; store: MemoryStore; project: string; mode: SyncMode; now: string }): Promise<SyncOutcome | undefined> => {
   const { io, store, project, mode, now } = args;
   const ledgerText = (await io.read(PATHS.ledger)) ?? "";
   const mark = ledgerMark(ledgerText);
   const cache = await loadMemoryCache(io, store.name, project);
-  const firstSync = !cache.lastSync;
-  if (mode === "fast" && !firstSync && cache.ledgerMark === mark && !cache.lastError) return undefined;
+  const verify = verifies(mode, cache, store, now);
+  if (!verify && cache.ledgerMark === mark && !cache.lastError) return undefined;
   const entries = foldLedger(parseLedger(ledgerText).records);
-  const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify: mode === "verify" || firstSync });
+  const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify });
   const failure = outcome.failed[0];
-  const saved: MemoryCache = { ...next, ledgerMark: mark, lastSync: now, lastError: failure ? `${failure.id}: ${failure.error}` : undefined };
+  const saved: MemoryCache = { ...next, ledgerMark: mark, lastSync: now, ...(verify ? { lastVerify: now } : {}), lastError: failure ? `${failure.id}: ${failure.error}` : undefined };
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
   return outcome;
 };
