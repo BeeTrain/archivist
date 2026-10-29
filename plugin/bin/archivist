@@ -60,7 +60,7 @@ var DEFAULT_CONFIG = {
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
   rules: { decisions: "compact", files: true },
-  memory: { enabled: true, server: "auto", project: "auto" },
+  memory: { enabled: true, project: "auto" },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15e3 },
   review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 }

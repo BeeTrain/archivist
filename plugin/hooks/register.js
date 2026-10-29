@@ -55,7 +55,7 @@ var DEFAULT_CONFIG = {
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
   rules: { decisions: "compact", files: true },
-  memory: { enabled: true, server: "auto", project: "auto" },
+  memory: { enabled: true, project: "auto" },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15e3 },
   review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 }
@@ -1330,6 +1330,280 @@ var openVikingStore = (call, project) => {
   };
 };
 
+// src/core/mem0-scope.ts
+var normalizeRemote = (remote) => {
+  let r = remote.trim();
+  if (r.startsWith("git@") && r.includes(":")) r = `https://${r.slice(4).replace(":", "/")}`;
+  if (r.endsWith(".git")) r = r.slice(0, -4);
+  const url = r.match(/^([^:/?#]+):\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/);
+  if (url) {
+    const [, scheme, netloc, path, query = "", fragment = ""] = url;
+    const [, host = "", port] = netloc.slice(netloc.lastIndexOf("@") + 1).match(/^(.*?)(?::(\d+))?$/);
+    r = `${scheme.toLowerCase()}://${host.toLowerCase()}${port ? `:${Number(port)}` : ""}${path}${query.length > 1 ? query : ""}${fragment.length > 1 ? fragment : ""}`;
+  }
+  return r.replace(/\/+$/, "");
+};
+var scopeValue = (raw) => {
+  const value = (raw ?? "").trim();
+  return /^\*+$/.test(value) ? "" : value;
+};
+var appIdOf = (rawRemote, identity, root2, configured) => {
+  const fixed = scopeValue(configured);
+  if (fixed) return fixed;
+  let remote = (rawRemote || (identity.startsWith("local:") ? "" : identity)).trim();
+  if (remote.endsWith(".git")) remote = remote.slice(0, -4);
+  const prefix = ["https://", "http://", "ssh://", "git://"].find((p) => remote.startsWith(p));
+  remote = prefix ? remote.slice(prefix.length) : remote.replace(/^git@/, "");
+  const parts = remote.replace(":", "/").split("/").filter(Boolean);
+  const name = parts.length >= 2 ? `${parts.at(-2)}-${parts.at(-1)}` : parts.at(-1);
+  return name ? name.replaceAll("/", "-").replaceAll(":", "-") : root2.split("/").filter(Boolean).at(-1) || "unknown";
+};
+var hash10 = async (text) => {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 10);
+};
+var mem0Scope = async (args) => {
+  const rawRemote = args.rawRemote ?? "";
+  const identity = normalizeRemote(rawRemote) || `local:${args.root}`;
+  const appId = appIdOf(rawRemote, identity, args.root, args.projectIdEnv);
+  const agentId = identity.startsWith("local:") ? `local-${appId}-${await hash10(args.root)}` : `${appId}-${await hash10(identity)}`;
+  const userId = args.userIdCandidates.map(scopeValue).find(Boolean) ?? "default";
+  return { appId, agentId, userId };
+};
+
+// src/core/memory-mem0.ts
+var MEM0_CLOUD_URL = "https://api.mem0.ai";
+var isMem0Cloud = (address) => {
+  if (!address.trim()) return true;
+  try {
+    const host = new URL(address.trim()).hostname;
+    return host === "mem0.ai" || host.endsWith(".mem0.ai");
+  } catch {
+    return false;
+  }
+};
+var hostAndPath2 = (address) => {
+  try {
+    const url = new URL(address);
+    return `${url.host}${url.pathname}`;
+  } catch {
+    return address;
+  }
+};
+var slug2 = (text) => text.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+var mem0StoreName = (address) => isMem0Cloud(address) ? "mem0" : `mem0-${slug2(hostAndPath2(address.trim()))}`;
+var mem0Transport = (fetcher, base, auth) => {
+  const root2 = base.trim().replace(/\/+$/, "");
+  const masked = (text) => auth?.secret ? text.replaceAll(auth.secret, "***") : text;
+  return async (method, path, body) => {
+    const headers = { "Content-Type": "application/json", ...auth ? { [auth.header]: auth.value } : {} };
+    try {
+      const reply = await fetcher(`${root2}${path}`, { method, headers, ...body === void 0 ? {} : { body: JSON.stringify(body) } });
+      return { status: reply.status, text: masked(reply.text) };
+    } catch (err) {
+      throw new Error(`mem0 at ${root2} is unreachable: ${masked(err instanceof Error ? err.message : String(err))}`);
+    }
+  };
+};
+var REFUSED_STATUSES = /* @__PURE__ */ new Set([401, 402, 403, 429]);
+var saidIn = (text) => {
+  try {
+    const body = JSON.parse(text);
+    const said = body?.detail ?? body?.message ?? body?.error;
+    return said === void 0 ? text : typeof said === "string" ? said : JSON.stringify(said);
+  } catch {
+    return text;
+  }
+};
+var reasonIn = (text) => saidIn(text).replace(/\s+/g, " ").trim().slice(0, 200);
+var succeeded = (reply) => {
+  if (reply.status >= 200 && reply.status < 300) return reply;
+  if (REFUSED_STATUSES.has(reply.status)) throw new MemoryRefused(`mem0 refused the request (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
+  throw new Error(`mem0 request failed (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
+};
+var answerOf = (reply) => {
+  const text = succeeded(reply).text;
+  try {
+    return JSON.parse(text || "null") ?? void 0;
+  } catch {
+    throw new Error(`mem0 answered with something that is not JSON (HTTP ${reply.status}): ${reasonIn(text)}`);
+  }
+};
+var itemsOf = (memories) => memories.flatMap((m) => {
+  const id = m.metadata?.archivist_id;
+  return m.id && typeof id === "string" ? [{ ref: m.id, id, ...typeof m.memory === "string" ? { text: m.memory } : {} }] : [];
+});
+var newestOf = (copies) => {
+  const updated = (c) => c.text === void 0 ? "" : readSignature(c.text)?.updated ?? "";
+  const newest = copies.filter((c) => c.text !== void 0).reduce((a, b) => !a || updated(b) > updated(a) ? b : a, void 0);
+  return newest ? { ref: newest.ref, text: newest.text } : void 0;
+};
+var metadataOf = (signature) => ({
+  archivist_key: `archivist/${signature.project}/${signature.id}`,
+  archivist_project: signature.project,
+  archivist_id: signature.id,
+  archivist_updated: signature.updated
+});
+var addedId = (reply) => {
+  const added = answerOf(reply)?.results?.[0]?.id;
+  if (!added) throw new Error("mem0 stored nothing");
+  return added;
+};
+var removeAt = async (http, path) => {
+  const reply = await http("DELETE", path);
+  if (reply.status !== 404) succeeded(reply);
+};
+var LIST_FIELDS = ["id", "memory", "metadata", "updated_at"];
+var mem0CloudStore = (http, scope, project) => {
+  const listWhere = async (metadata) => {
+    const items = [];
+    for (let page = 1; ; page++) {
+      const answer = answerOf(
+        await http("POST", `/v3/memories/?page=${page}&page_size=200`, { filters: { AND: [{ app_id: scope.appId }, { metadata }] }, fields: LIST_FIELDS })
+      );
+      const results = answer?.results ?? [];
+      items.push(...itemsOf(results));
+      if (!answer?.next || !results.length) return items;
+    }
+  };
+  const remove = (ref) => removeAt(http, `/v1/memories/${encodeURIComponent(ref)}/`);
+  return {
+    name: "mem0",
+    readsCostQuota: true,
+    listsText: true,
+    async put(_id, text, ref, signature) {
+      const added = addedId(
+        await http("POST", "/v3/memories/add/", {
+          messages: [{ role: "user", content: text }],
+          infer: false,
+          immutable: true,
+          app_id: scope.appId,
+          agent_id: scope.agentId,
+          user_id: scope.userId,
+          metadata: metadataOf(signature)
+        })
+      );
+      if (ref && ref !== added) {
+        try {
+          await remove(ref);
+        } catch (err) {
+          if (err instanceof MemoryRefused) throw err;
+        }
+      }
+      return added;
+    },
+    remove,
+    fetch: async (id) => newestOf(await listWhere({ archivist_key: `archivist/${project}/${id}` })),
+    list: async () => ({ items: await listWhere({ archivist_project: project }) })
+  };
+};
+var SERVER_LIST_LIMIT = 1e3;
+var mem0ServerStore = (http, scope, project, name) => {
+  const add = async (text, signature) => addedId(await http("POST", "/memories", { messages: [{ role: "user", content: text }], infer: false, agent_id: scope.agentId, user_id: scope.userId, metadata: metadataOf(signature) }));
+  const list = async () => {
+    const answer = answerOf(await http("GET", `/memories?agent_id=${encodeURIComponent(scope.agentId)}&top_k=${SERVER_LIST_LIMIT}`));
+    const rows = Array.isArray(answer) ? answer : answer?.results ?? [];
+    return { items: itemsOf(rows.filter((row) => row.metadata?.archivist_project === project)), cut: rows.length >= SERVER_LIST_LIMIT };
+  };
+  return {
+    name,
+    readsCostQuota: false,
+    listsText: true,
+    async put(_id, text, ref, signature) {
+      if (!ref) return add(text, signature);
+      const reply = await http("PUT", `/memories/${encodeURIComponent(ref)}`, { text, metadata: metadataOf(signature) });
+      if (reply.status === 404) return add(text, signature);
+      succeeded(reply);
+      return ref;
+    },
+    remove: (ref) => removeAt(http, `/memories/${encodeURIComponent(ref)}`),
+    async fetch(id, ref) {
+      if (ref) {
+        const reply = await http("GET", `/memories/${encodeURIComponent(ref)}`);
+        const found = reply.status === 404 ? void 0 : answerOf(reply);
+        if (found?.metadata?.archivist_key === `archivist/${project}/${id}` && typeof found.memory === "string") return { ref: found.id ?? ref, text: found.memory };
+      }
+      return newestOf((await list()).items.filter((item) => item.id === id));
+    },
+    list
+  };
+};
+
+// src/core/memory-choice.ts
+var CLOUD_PROJECTS_OPTION = "memory_cloud_projects";
+var MEMORY_KINDS = ["auto", "openviking", "mem0", "off"];
+var textOption = (value) => typeof value === "string" ? value.trim() : "";
+var sameProject = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+var projectEntries = (value) => {
+  const entries = [];
+  for (const raw of Array.isArray(value) ? value : [value]) {
+    if (typeof raw !== "string") continue;
+    for (const entry of raw.split(/[\s,]+/)) if (entry && !entries.some((known) => sameProject(known, entry))) entries.push(entry);
+  }
+  return entries;
+};
+var readMemoryOptions = (options) => ({
+  memory: MEMORY_KINDS.find((kind) => kind === options.memory) ?? "auto",
+  url: textOption(options.memory_url),
+  apiKey: textOption(options.memory_api_key),
+  cloudProjects: projectEntries(options[CLOUD_PROJECTS_OPTION])
+});
+var cloudAllowedBy = (project, entries) => {
+  const id = project.toLowerCase();
+  return entries.find((entry) => {
+    const allowed = entry.trim().toLowerCase();
+    return allowed === "*" || allowed === id || allowed.endsWith("/*") && id.startsWith(allowed.slice(0, -1));
+  });
+};
+var withCloudProject = (entries, project) => entries.some((entry) => sameProject(entry, project)) ? [...entries] : [...entries, project];
+var withoutCloudProject = (entries, project) => entries.filter((entry) => !sameProject(entry, project));
+var parsedUrl = (address) => {
+  try {
+    return new URL(address);
+  } catch {
+    return void 0;
+  }
+};
+var addressProblem = (address) => {
+  const url = parsedUrl(address);
+  if (!url || url.protocol !== "http:" && url.protocol !== "https:") return "The mem0 address in /config is not an http:// or https:// URL, such as http://localhost:8888.";
+  if (url.username || url.password) return "The mem0 address in /config has a user name or password in it: put the key under mem0 API key instead.";
+  return void 0;
+};
+var chooseMemory = (args) => {
+  const { options, project, envKey, openVikingServer: openVikingServer2 } = args;
+  if (options.memory === "off") return { kind: "none", why: "External memory is off in the plugin options (/config): entries stay in project files." };
+  if (options.memory !== "mem0") {
+    if (openVikingServer2) return { kind: "openviking", server: openVikingServer2 };
+    return {
+      kind: "none",
+      why: options.memory === "openviking" ? "OpenViking is chosen in /config, but it is not connected to this session." : "No OpenViking is connected to this session; to use mem0, choose it under External memory in /config."
+    };
+  }
+  const problem = options.url ? addressProblem(options.url) : void 0;
+  if (problem) return { kind: "none", why: problem };
+  const cloud = isMem0Cloud(options.url);
+  const key = options.apiKey || (cloud ? envKey?.trim() || void 0 : void 0);
+  if (cloud && !key) return { kind: "none", why: "mem0 cloud is chosen, but it has no key: set the mem0 API key in /config, or MEM0_API_KEY in the environment." };
+  return { kind: "mem0", base: options.url || MEM0_CLOUD_URL, cloud, key, allowed: !cloud || cloudAllowedBy(project, options.cloudProjects) !== void 0 };
+};
+var memoryWhere = (choice) => {
+  if (choice.kind === "openviking") return choice.server;
+  if (choice.kind === "mem0") return choice.cloud ? "mem0 cloud" : `mem0 at ${choice.base}`;
+  return "";
+};
+var storeNameFor = (options) => {
+  if (options.memory === "off") return void 0;
+  return options.memory === "mem0" ? mem0StoreName(options.url) : "openviking";
+};
+var memorySyncBlock = (config, choice, project) => {
+  if (!config.enabled) return "Archivist is off in this project: enabled is false in .archivist/config.json.";
+  if (!config.memory.enabled) return "Memory sync is off: set memory.enabled to true in .archivist/config.json.";
+  if (choice.kind === "none") return choice.why;
+  if (choice.kind === "mem0" && !choice.allowed) return `mem0 cloud is chosen, but ${project} is not sent there: /archivist memory on sends it.`;
+  return void 0;
+};
+
 // src/core/log.ts
 var LOG_LINES = 100;
 var logKey = (root2) => `archivist:log:${root2}`;
@@ -1784,11 +2058,11 @@ var holdOf = (spent, limits, analyzer, now) => {
 var SEG_KEY = "archivist:seg:";
 var BUDGET_KEY = "archivist:budget:";
 var LAST_KEY = "archivist:last:";
+var CLOUD_HINT_KEY = "archivist:cloud-hint:";
 var RETRY_MS = 15 * 6e4;
 var BUSY_RETRY_MS = 6e4;
 var FORK_TIMEOUT_MS = 12e4;
 var MEMORY_CHECK_AFTER_START_MS = 5e3;
-var NO_MEMORY = "No supported memory plugin is connected to this session (Archivist supports OpenViking).";
 var segKey = (s) => `${SEG_KEY}${s.session}:${s.id}`;
 var toUsage2 = (u) => ({
   input: u?.input_tokens ?? 0,
@@ -1816,6 +2090,7 @@ var ownTurnPending = false;
 var lastStatus;
 var statusKind;
 var ownTurns = /* @__PURE__ */ new Set();
+var memoryOptions = readMemoryOptions({});
 var memoryBusy = false;
 var memoryAgain;
 var SYNC_STRENGTH = ["fast", "start", "full"];
@@ -1927,8 +2202,7 @@ function mcpCaller($, server) {
     return { text: blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n"), isError: Boolean(reply.isError) };
   };
 }
-async function memoryServer($, config) {
-  if (config.memory.server !== "auto") return config.memory.server;
+async function openVikingServer($) {
   const usage = await $.session.usage({ breakdown: "summary" });
   return findOpenVikingServer(usage.context?.breakdown?.mcpTools ?? []);
 }
@@ -1936,11 +2210,64 @@ async function gitRemote($, base) {
   const run = await $.process.run(["git", "-C", base, "remote", "get-url", "origin"]);
   return run.exitCode === 0 ? String(run.stdout ?? "").trim() || void 0 : void 0;
 }
+async function gitConfigRemote($, base) {
+  const run = await $.process.run(["git", "-C", base, "config", "--get", "remote.origin.url"]);
+  return run.exitCode === 0 ? String(run.stdout ?? "").trim() || void 0 : void 0;
+}
+async function optionRow($, key) {
+  return (await $.config.list()).find((row) => key.test(row.key));
+}
+async function mem0UserIds($) {
+  const option = (await optionRow($, /^mem0(@.*)?\.user_id$/))?.value;
+  return [
+    typeof option === "string" ? option : void 0,
+    await $.env.get("MEM0_CODE_USER_ID"),
+    await $.env.get("MEM0_USER_ID"),
+    await $.env.get("MEM0_RESOLVED_USER_ID"),
+    await $.env.get("USER"),
+    await $.env.get("USERNAME")
+  ];
+}
+function mem0Fetcher($) {
+  return async (url, init) => {
+    const reply = await $.http.fetch(url, init);
+    return { status: reply.status, text: String(reply.text ?? "") };
+  };
+}
+async function mem0Store($, base, choice, project) {
+  const scope = await mem0Scope({
+    rawRemote: await gitConfigRemote($, base),
+    root: base,
+    projectIdEnv: await $.env.get("MEM0_PROJECT_ID"),
+    userIdCandidates: await mem0UserIds($)
+  });
+  const auth = !choice.key ? void 0 : choice.cloud ? { header: "Authorization", value: `Token ${choice.key}`, secret: choice.key } : { header: "X-API-Key", value: choice.key, secret: choice.key };
+  const http = mem0Transport(mem0Fetcher($), choice.base, auth);
+  return choice.cloud ? mem0CloudStore(http, scope, project) : mem0ServerStore(http, scope, project, mem0StoreName(choice.base));
+}
+async function memoryProject($, base, config) {
+  return config.memory.project !== "auto" ? config.memory.project : projectId(await gitRemote($, base), base);
+}
 async function memoryTarget($, base, config) {
-  const server = await memoryServer($, config);
-  if (!server) return void 0;
-  const project = config.memory.project !== "auto" ? config.memory.project : projectId(await gitRemote($, base), base);
-  return { server, project, store: openVikingStore(mcpCaller($, server), project) };
+  const project = await memoryProject($, base, config);
+  const kind = memoryOptions.memory;
+  const choice = chooseMemory({
+    options: memoryOptions,
+    project,
+    envKey: kind === "mem0" ? await $.env.get("MEM0_API_KEY") : void 0,
+    openVikingServer: kind === "auto" || kind === "openviking" ? await openVikingServer($) : void 0
+  });
+  const where = memoryWhere(choice);
+  if (choice.kind === "openviking") return { choice, project, where, store: openVikingStore(mcpCaller($, choice.server), project) };
+  if (choice.kind === "mem0") return { choice, project, where, store: await mem0Store($, base, choice, project) };
+  return { choice, project, where };
+}
+async function hintCloudOnce($, base, project, text) {
+  const key = CLOUD_HINT_KEY + project;
+  if (await $.store.get(key)) return;
+  await $.store.set(key, true);
+  $.ui.toast(text, { timeoutMs: cfg.report.toastMs });
+  await log($, base, `memory: ${text}`);
 }
 async function syncToMemory($, base, mode) {
   if (memoryBusy) {
@@ -1951,12 +2278,17 @@ async function syncToMemory($, base, mode) {
   try {
     const io = makeIo($, base);
     const config = await loadConfig(io);
-    if (!config.enabled || !config.memory.enabled) return;
-    if (mode === "fast" && await memoryUpToDate(io, "openviking")) return;
+    const name = storeNameFor(memoryOptions);
+    if (!config.enabled || !config.memory.enabled || !name) return;
+    if (mode === "fast" && await memoryUpToDate(io, name)) return;
     const target = await memoryTarget($, base, config);
-    if (!target) return;
+    const block = memorySyncBlock(config, target.choice, target.project);
+    if (block || !target.store) {
+      if (block && mode === "start" && target.choice.kind === "mem0" && !target.choice.allowed) await hintCloudOnce($, base, target.project, block);
+      return;
+    }
     const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: (/* @__PURE__ */ new Date()).toISOString() });
-    if (outcome) await log($, base, `memory ${mode} (${target.server}, ${target.project}): ${memoryOutcomeText(outcome)}`);
+    if (outcome) await log($, base, `memory ${mode} (${target.where}, ${target.project}): ${memoryOutcomeText(outcome)}`);
   } catch (err) {
     await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
@@ -1969,25 +2301,53 @@ async function syncToMemory($, base, mode) {
 function syncToMemoryLater($, base, mode, delayMs = 0) {
   $.clock.after(delayMs, async () => syncToMemory($, base, mode));
 }
+var stillSentBy = (project, entry) => `${project} goes to cloud memory because of ${entry} in /config (Archivist \u203A Projects sent to cloud memory): change it there.`;
+async function cloudProjectsCommand($, project, action) {
+  const row = await optionRow($, /^archivist(@.*)?\.memory_cloud_projects$/);
+  if (!row) return "The plugin options are not available in this session: set them in /config.";
+  const entries = readMemoryOptions({ [CLOUD_PROJECTS_OPTION]: row.value }).cloudProjects;
+  const next = action === "on" ? withCloudProject(entries, project) : withoutCloudProject(entries, project);
+  const sentBy = cloudAllowedBy(project, action === "on" ? entries : next);
+  if (action === "on" && sentBy) return `${project} already goes to cloud memory (${sentBy} in /config).`;
+  if (action === "off" && next.length === entries.length) return sentBy ? stillSentBy(project, sentBy) : `${project} is not sent to cloud memory.`;
+  const { deny } = await $.config.set({ key: row.key, value: next.join(", ") });
+  if (deny) return `Not changed: ${deny}`;
+  if (action === "on") return `Added ${project} to the projects sent to cloud memory; its entries go there after the plugin reloads.`;
+  return sentBy ? stillSentBy(project, sentBy) : `${project} no longer goes to cloud memory. What it sent stays there: /archivist memory clear removes it.`;
+}
 async function memoryCommand($, io, config, action) {
-  const target = await memoryTarget($, root, config);
-  const where = target ? `${target.server}, project ${target.project}` : "";
-  const syncOn = config.enabled && config.memory.enabled;
-  if (action === "sync") {
-    if (!syncOn) return "Memory sync is off: set memory.enabled to true in .archivist/config.json.";
-    if (!target) return NO_MEMORY;
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() });
-    return `Synced with ${where}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
+  try {
+    if (action === "on" || action === "off") return await cloudProjectsCommand($, await memoryProject($, root, config), action);
+    const target = await memoryTarget($, root, config);
+    const block = memorySyncBlock(config, target.choice, target.project);
+    const place = `${target.where}, project ${target.project}`;
+    if (action === "sync") {
+      if (block || !target.store) return block ?? place;
+      const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() });
+      return `Synced with ${place}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
+    }
+    if (action === "clear") {
+      if (!target.store) return block ?? place;
+      const removed = await clearMemory(io, target.store, target.project);
+      return [
+        `Removed ${removed.length} Archivist items from ${place}.`,
+        ...block ? [] : ["Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out."]
+      ].join(" ");
+    }
+    const head2 = target.choice.kind === "none" ? target.choice.why : `Memory: ${place}`;
+    return [head2, ...block && block !== head2 ? [block] : [], ...memoryLines(await loadMemoryCaches(io))].join("\n");
+  } catch (err) {
+    return `Memory: ${err instanceof Error ? err.message : String(err)}`;
   }
-  if (action === "clear") {
-    if (!target) return NO_MEMORY;
-    const removed = await clearMemory(io, target.store, target.project);
-    return [
-      `Removed ${removed.length} Archivist items from ${where}.`,
-      ...syncOn ? ["Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out."] : []
-    ].join(" ");
+}
+async function memoryNote($, config) {
+  try {
+    const target = await memoryTarget($, root, config);
+    if (memoryOptions.memory === "auto" && target.choice.kind === "none") return void 0;
+    return memorySyncBlock(config, target.choice, target.project);
+  } catch {
+    return void 0;
   }
-  return [target ? `Memory: ${where}${syncOn ? "" : " (sync is off: memory.enabled)"}` : NO_MEMORY, ...memoryLines(await loadMemoryCaches(io))].join("\n");
 }
 async function analyse($, stored, current) {
   const s = stored.seg;
@@ -2070,7 +2430,8 @@ ${err.stack ?? ""}` : String(err);
     analysing = false;
   }
 }
-function register(on) {
+function register(on, options) {
+  memoryOptions = readMemoryOptions(options);
   on("session.start", async ($, e, next) => {
     root = await $.session.root();
     session = await $.session.id();
@@ -2078,7 +2439,7 @@ function register(on) {
     await $.command.register({
       name: "archivist",
       description: "Archivist: what it learned from the last task (report) or the knowledge base status (status)",
-      argumentHint: "[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|memory [status|sync|clear]|log]"
+      argumentHint: "[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|memory [status|sync|clear|on|off]|log]"
     });
     const waiting = /* @__PURE__ */ new Map();
     for (const key of await $.store.keys()) {
@@ -2201,7 +2562,8 @@ function register(on) {
       return {
         text: await healthText(io, (await loadState(io)).entries, cfg, /* @__PURE__ */ new Date(), {
           log: await $.store.get(logKey(root)) ?? [],
-          spentToday: await $.store.get(BUDGET_KEY + today()) ?? 0
+          spentToday: await $.store.get(BUDGET_KEY + today()) ?? 0,
+          memoryNote: await memoryNote($, cfg)
         })
       };
     if (verb === "recall") return { text: recallText((await loadState(io)).entries, rest.join(" ")) };

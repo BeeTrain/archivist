@@ -6,7 +6,7 @@
 //   - `$` may only be passed to functions declared at the top level of this file;
 //   - work that must outlive a hook's dispatch runs on `$.clock.after`; a module reload drops timers,
 //     so the open task is kept in `$.store` after every turn and picked up again on `session.start`.
-import type { On } from 'claude-code'
+import type { On, PluginOptions } from 'claude-code'
 import { DEFAULT_CONFIG, loadConfig, type Config } from '../../../core/config.js'
 import { PATHS, joinPath, relPath, withLocalIgnored, type Io, type Llm, type LlmReply } from '../../../core/io.js'
 import { activeEntries, loadState } from '../../../core/ledger.js'
@@ -16,6 +16,20 @@ import { parseOptions, splitArgs } from '../../../core/args.js'
 import { healthText, memoryLines, recallText, statsText } from '../../../core/maintenance.js'
 import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryUpToDate, projectId, syncMemory, type MemoryStore, type SyncMode } from '../../../core/memory.js'
 import { findOpenVikingServer, openVikingStore, type McpCall } from '../../../core/memory-openviking.js'
+import { mem0Scope } from '../../../core/mem0-scope.js'
+import { mem0CloudStore, mem0ServerStore, mem0StoreName, mem0Transport, type Fetcher, type Mem0Auth } from '../../../core/memory-mem0.js'
+import {
+  CLOUD_PROJECTS_OPTION,
+  chooseMemory,
+  cloudAllowedBy,
+  memorySyncBlock,
+  memoryWhere,
+  readMemoryOptions,
+  storeNameFor,
+  withCloudProject,
+  withoutCloudProject,
+  type MemoryChoice,
+} from '../../../core/memory-choice.js'
 import { logKey, withLine } from '../../../core/log.js'
 import { countsText, shouldRecount, type StatusKind } from '../../../core/status.js'
 import { truncate } from '../../../core/text.js'
@@ -28,12 +42,12 @@ import { noticeText, statusLine } from '../../../analyzer/report.js'
 const SEG_KEY = 'archivist:seg:'
 const BUDGET_KEY = 'archivist:budget:'
 const LAST_KEY = 'archivist:last:'
+const CLOUD_HINT_KEY = 'archivist:cloud-hint:'
 /** Wait before trying again when a budget or rate limit held the analysis back. */
 const RETRY_MS = 15 * 60_000
 const BUSY_RETRY_MS = 60_000
 const FORK_TIMEOUT_MS = 120_000
 const MEMORY_CHECK_AFTER_START_MS = 5_000
-const NO_MEMORY = 'No supported memory plugin is connected to this session (Archivist supports OpenViking).'
 
 interface StoredSegment {
   root: string
@@ -83,6 +97,7 @@ let ownTurnPending = false
 let lastStatus: string | undefined
 let statusKind: StatusKind | undefined
 const ownTurns = new Set<string>()
+let memoryOptions = readMemoryOptions({})
 let memoryBusy = false
 let memoryAgain: SyncMode | undefined
 const SYNC_STRENGTH: SyncMode[] = ['fast', 'start', 'full']
@@ -210,8 +225,7 @@ function mcpCaller($: any, server: string): McpCall {
   }
 }
 
-async function memoryServer($: any, config: Config): Promise<string | undefined> {
-  if (config.memory.server !== 'auto') return config.memory.server
+async function openVikingServer($: any): Promise<string | undefined> {
   const usage = await $.session.usage({ breakdown: 'summary' })
   return findOpenVikingServer((usage.context?.breakdown?.mcpTools ?? []) as { name: string; serverName: string }[])
 }
@@ -221,11 +235,82 @@ async function gitRemote($: any, base: string): Promise<string | undefined> {
   return run.exitCode === 0 ? String(run.stdout ?? '').trim() || undefined : undefined
 }
 
-async function memoryTarget($: any, base: string, config: Config): Promise<{ server: string; project: string; store: MemoryStore } | undefined> {
-  const server = await memoryServer($, config)
-  if (!server) return undefined
-  const project = config.memory.project !== 'auto' ? config.memory.project : projectId(await gitRemote($, base), base)
-  return { server, project, store: openVikingStore(mcpCaller($, server), project) }
+async function gitConfigRemote($: any, base: string): Promise<string | undefined> {
+  const run = await $.process.run(['git', '-C', base, 'config', '--get', 'remote.origin.url'])
+  return run.exitCode === 0 ? String(run.stdout ?? '').trim() || undefined : undefined
+}
+
+async function optionRow($: any, key: RegExp): Promise<{ key: string; value: unknown } | undefined> {
+  return ((await $.config.list()) as { key: string; value: unknown }[]).find((row) => key.test(row.key))
+}
+
+async function mem0UserIds($: any): Promise<(string | undefined)[]> {
+  const option = (await optionRow($, /^mem0(@.*)?\.user_id$/))?.value
+  return [
+    typeof option === 'string' ? option : undefined,
+    await $.env.get('MEM0_CODE_USER_ID'),
+    await $.env.get('MEM0_USER_ID'),
+    await $.env.get('MEM0_RESOLVED_USER_ID'),
+    await $.env.get('USER'),
+    await $.env.get('USERNAME'),
+  ]
+}
+
+function mem0Fetcher($: any): Fetcher {
+  return async (url, init) => {
+    const reply = await $.http.fetch(url, init)
+    return { status: reply.status, text: String(reply.text ?? '') }
+  }
+}
+
+async function mem0Store($: any, base: string, choice: Extract<MemoryChoice, { kind: 'mem0' }>, project: string): Promise<MemoryStore> {
+  const scope = await mem0Scope({
+    rawRemote: await gitConfigRemote($, base),
+    root: base,
+    projectIdEnv: await $.env.get('MEM0_PROJECT_ID'),
+    userIdCandidates: await mem0UserIds($),
+  })
+  const auth: Mem0Auth | undefined = !choice.key
+    ? undefined
+    : choice.cloud
+      ? { header: 'Authorization', value: `Token ${choice.key}`, secret: choice.key }
+      : { header: 'X-API-Key', value: choice.key, secret: choice.key }
+  const http = mem0Transport(mem0Fetcher($), choice.base, auth)
+  return choice.cloud ? mem0CloudStore(http, scope, project) : mem0ServerStore(http, scope, project, mem0StoreName(choice.base))
+}
+
+async function memoryProject($: any, base: string, config: Config): Promise<string> {
+  return config.memory.project !== 'auto' ? config.memory.project : projectId(await gitRemote($, base), base)
+}
+
+interface MemoryTarget {
+  choice: MemoryChoice
+  project: string
+  where: string
+  store?: MemoryStore
+}
+
+async function memoryTarget($: any, base: string, config: Config): Promise<MemoryTarget> {
+  const project = await memoryProject($, base, config)
+  const kind = memoryOptions.memory
+  const choice = chooseMemory({
+    options: memoryOptions,
+    project,
+    envKey: kind === 'mem0' ? await $.env.get('MEM0_API_KEY') : undefined,
+    openVikingServer: kind === 'auto' || kind === 'openviking' ? await openVikingServer($) : undefined,
+  })
+  const where = memoryWhere(choice)
+  if (choice.kind === 'openviking') return { choice, project, where, store: openVikingStore(mcpCaller($, choice.server), project) }
+  if (choice.kind === 'mem0') return { choice, project, where, store: await mem0Store($, base, choice, project) }
+  return { choice, project, where }
+}
+
+async function hintCloudOnce($: any, base: string, project: string, text: string): Promise<void> {
+  const key = CLOUD_HINT_KEY + project
+  if (await $.store.get(key)) return
+  await $.store.set(key, true)
+  $.ui.toast(text, { timeoutMs: cfg.report.toastMs })
+  await log($, base, `memory: ${text}`)
 }
 
 async function syncToMemory($: any, base: string, mode: SyncMode): Promise<void> {
@@ -237,12 +322,17 @@ async function syncToMemory($: any, base: string, mode: SyncMode): Promise<void>
   try {
     const io = makeIo($, base)
     const config = await loadConfig(io)
-    if (!config.enabled || !config.memory.enabled) return
-    if (mode === 'fast' && (await memoryUpToDate(io, 'openviking'))) return
+    const name = storeNameFor(memoryOptions)
+    if (!config.enabled || !config.memory.enabled || !name) return
+    if (mode === 'fast' && (await memoryUpToDate(io, name))) return
     const target = await memoryTarget($, base, config)
-    if (!target) return
+    const block = memorySyncBlock(config, target.choice, target.project)
+    if (block || !target.store) {
+      if (block && mode === 'start' && target.choice.kind === 'mem0' && !target.choice.allowed) await hintCloudOnce($, base, target.project, block)
+      return
+    }
     const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: new Date().toISOString() })
-    if (outcome) await log($, base, `memory ${mode} (${target.server}, ${target.project}): ${memoryOutcomeText(outcome)}`)
+    if (outcome) await log($, base, `memory ${mode} (${target.where}, ${target.project}): ${memoryOutcomeText(outcome)}`)
   } catch (err) {
     await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
@@ -257,25 +347,57 @@ function syncToMemoryLater($: any, base: string, mode: SyncMode, delayMs = 0): v
   $.clock.after(delayMs, async () => syncToMemory($, base, mode))
 }
 
+const stillSentBy = (project: string, entry: string): string =>
+  `${project} goes to cloud memory because of ${entry} in /config (Archivist › Projects sent to cloud memory): change it there.`
+
+async function cloudProjectsCommand($: any, project: string, action: 'on' | 'off'): Promise<string> {
+  const row = await optionRow($, /^archivist(@.*)?\.memory_cloud_projects$/)
+  if (!row) return 'The plugin options are not available in this session: set them in /config.'
+  const entries = readMemoryOptions({ [CLOUD_PROJECTS_OPTION]: row.value }).cloudProjects
+  const next = action === 'on' ? withCloudProject(entries, project) : withoutCloudProject(entries, project)
+  const sentBy = cloudAllowedBy(project, action === 'on' ? entries : next)
+  if (action === 'on' && sentBy) return `${project} already goes to cloud memory (${sentBy} in /config).`
+  if (action === 'off' && next.length === entries.length) return sentBy ? stillSentBy(project, sentBy) : `${project} is not sent to cloud memory.`
+  const { deny } = await $.config.set({ key: row.key, value: next.join(', ') })
+  if (deny) return `Not changed: ${deny}`
+  if (action === 'on') return `Added ${project} to the projects sent to cloud memory; its entries go there after the plugin reloads.`
+  return sentBy ? stillSentBy(project, sentBy) : `${project} no longer goes to cloud memory. What it sent stays there: /archivist memory clear removes it.`
+}
+
 async function memoryCommand($: any, io: Io, config: Config, action: string): Promise<string> {
-  const target = await memoryTarget($, root, config)
-  const where = target ? `${target.server}, project ${target.project}` : ''
-  const syncOn = config.enabled && config.memory.enabled
-  if (action === 'sync') {
-    if (!syncOn) return 'Memory sync is off: set memory.enabled to true in .archivist/config.json.'
-    if (!target) return NO_MEMORY
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: 'full', now: new Date().toISOString() })
-    return `Synced with ${where}: ${outcome ? memoryOutcomeText(outcome) : 'nothing to do'}.`
+  try {
+    if (action === 'on' || action === 'off') return await cloudProjectsCommand($, await memoryProject($, root, config), action)
+    const target = await memoryTarget($, root, config)
+    const block = memorySyncBlock(config, target.choice, target.project)
+    const place = `${target.where}, project ${target.project}`
+    if (action === 'sync') {
+      if (block || !target.store) return block ?? place
+      const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: 'full', now: new Date().toISOString() })
+      return `Synced with ${place}: ${outcome ? memoryOutcomeText(outcome) : 'nothing to do'}.`
+    }
+    if (action === 'clear') {
+      if (!target.store) return block ?? place
+      const removed = await clearMemory(io, target.store, target.project)
+      return [
+        `Removed ${removed.length} Archivist items from ${place}.`,
+        ...(block ? [] : ['Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out.']),
+      ].join(' ')
+    }
+    const head = target.choice.kind === 'none' ? target.choice.why : `Memory: ${place}`
+    return [head, ...(block && block !== head ? [block] : []), ...memoryLines(await loadMemoryCaches(io))].join('\n')
+  } catch (err) {
+    return `Memory: ${err instanceof Error ? err.message : String(err)}`
   }
-  if (action === 'clear') {
-    if (!target) return NO_MEMORY
-    const removed = await clearMemory(io, target.store, target.project)
-    return [
-      `Removed ${removed.length} Archivist items from ${where}.`,
-      ...(syncOn ? ['Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out.'] : []),
-    ].join(' ')
+}
+
+async function memoryNote($: any, config: Config): Promise<string | undefined> {
+  try {
+    const target = await memoryTarget($, root, config)
+    if (memoryOptions.memory === 'auto' && target.choice.kind === 'none') return undefined
+    return memorySyncBlock(config, target.choice, target.project)
+  } catch {
+    return undefined
   }
-  return [target ? `Memory: ${where}${syncOn ? '' : ' (sync is off: memory.enabled)'}` : NO_MEMORY, ...memoryLines(await loadMemoryCaches(io))].join('\n')
 }
 
 /** Runs the pipeline over one finished task. `current` = it belongs to this live session (messages and fork available). */
@@ -367,7 +489,8 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
   }
 }
 
-export function register(on: On): void {
+export function register(on: On, options: PluginOptions): void {
+  memoryOptions = readMemoryOptions(options)
   on('session.start', async ($, e, next) => {
     root = await $.session.root()
     session = await $.session.id()
@@ -375,7 +498,7 @@ export function register(on: On): void {
     await $.command.register({
       name: 'archivist',
       description: 'Archivist: what it learned from the last task (report) or the knowledge base status (status)',
-      argumentHint: '[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> …|deprecate <id> --reason …|memory [status|sync|clear]|log]',
+      argumentHint: '[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> …|deprecate <id> --reason …|memory [status|sync|clear|on|off]|log]',
     })
 
     // Tasks waiting for analysis: this session's (a module reload dropped their timer; the open one is closed
@@ -516,6 +639,7 @@ export function register(on: On): void {
         text: await healthText(io, (await loadState(io)).entries, cfg, new Date(), {
           log: ((await $.store.get(logKey(root))) as string[] | undefined) ?? [],
           spentToday: ((await $.store.get(BUDGET_KEY + today())) as number | undefined) ?? 0,
+          memoryNote: await memoryNote($, cfg),
         }),
       }
     if (verb === 'recall') return { text: recallText((await loadState(io)).entries, rest.join(' ')) }
