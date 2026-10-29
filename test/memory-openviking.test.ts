@@ -3,6 +3,7 @@ import { findOpenVikingServer, openVikingStore, type McpReply } from "../src/cor
 
 const project = "github.com/beetrain/archivist";
 const base = "viking://resources/archivist/github.com/beetrain/archivist/";
+const signature = { project, id: "gk-1", updated: "2026-10-23T10:00:00.000Z" };
 
 const server = (replies: Record<string, McpReply>) => {
   const calls: { tool: string; args: Record<string, unknown> }[] = [];
@@ -34,13 +35,13 @@ describe("finding the OpenViking server", () => {
 describe("the OpenViking store", () => {
   it("writes an item as a resource file of the project and answers with its address", async () => {
     const { calls, store } = server({ write: { isError: false, text: JSON.stringify({ result: `Wrote 12 bytes to ${base}gk-1.md (mode=create).\nIndexing: semantic=queued, vector=queued.` }) } });
-    expect(await store.put("gk-1", "# Title\n")).toBe(`${base}gk-1.md`);
+    expect(await store.put("gk-1", "# Title\n", undefined, signature)).toBe(`${base}gk-1.md`);
     expect(calls).toEqual([{ tool: "write", args: { uri: `${base}gk-1.md`, content: "# Title\n", mode: "replace" } }]);
   });
 
   it("fails a write the server refused", async () => {
     const { store } = server({ write: { isError: true, text: "Error executing tool write: permission denied" } });
-    await expect(store.put("gk-1", "# Title\n")).rejects.toThrow("permission denied");
+    await expect(store.put("gk-1", "# Title\n", undefined, signature)).rejects.toThrow("permission denied");
   });
 
   it("counts removing an item that is already gone as done, and fails on other errors", async () => {
@@ -62,16 +63,18 @@ describe("the OpenViking store", () => {
   it("lists the project's item files and nothing else, from the answer wrapped as the server sends it", async () => {
     const listing = "[file] gk-1.md\n[file] cmd-2.md\n[dir] drafts\n[file] .abstract.md\n[file] notes.txt";
     const { calls, store } = server({ list: { isError: false, text: JSON.stringify({ result: listing }) } });
-    expect(await store.list!()).toEqual([
-      { id: "gk-1", ref: `${base}gk-1.md` },
-      { id: "cmd-2", ref: `${base}cmd-2.md` },
-    ]);
+    expect(await store.list!()).toEqual({
+      items: [
+        { id: "gk-1", ref: `${base}gk-1.md` },
+        { id: "cmd-2", ref: `${base}cmd-2.md` },
+      ],
+    });
     expect(calls[0]).toEqual({ tool: "list", args: { uri: base } });
-    expect(await server({ list: { isError: false, text: listing } }).store.list!()).toHaveLength(2);
+    expect((await server({ list: { isError: false, text: listing } }).store.list!()).items).toHaveLength(2);
   });
 
   it("lists nothing for a project with no folder yet", async () => {
-    expect(await server({ list: { isError: false, text: JSON.stringify({ result: `(no entries under ${base})` }) } }).store.list!()).toEqual([]);
-    expect(await server({ list: { isError: true, text: `Error executing tool list: Directory not found: ${base}` } }).store.list!()).toEqual([]);
+    expect(await server({ list: { isError: false, text: JSON.stringify({ result: `(no entries under ${base})` }) } }).store.list!()).toEqual({ items: [] });
+    expect(await server({ list: { isError: true, text: `Error executing tool list: Directory not found: ${base}` } }).store.list!()).toEqual({ items: [] });
   });
 });

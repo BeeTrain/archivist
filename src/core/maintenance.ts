@@ -120,6 +120,7 @@ export const memoryLines = (memories: MemoryCache[]): string[] =>
     `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
     ...(m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : []),
     ...(m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : []),
+    ...(m.listCut ? ["- memory listed as many items as it gives at once: the counts above may be short"] : []),
     ...(m.lastError ? [`- last error: ${m.lastError}`] : []),
   ]);
 

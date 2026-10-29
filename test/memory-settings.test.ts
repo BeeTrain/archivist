@@ -59,6 +59,15 @@ describe("health of the memory projection", () => {
     expect(text.split("## What to do\n")[1]).toContain("/archivist memory sync");
   });
 
+  it("warns that the counts may be short when memory listed as many items as it gives at once", async () => {
+    const io = memoryIo();
+    await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);
+    io.files.set(memoryCachePath("mem0-localhost-8888"), JSON.stringify({ store: "mem0-localhost-8888", project: "github.com/beetrain/archivist", items: {}, lastSync: day(0), listCut: true }));
+    const text = await healthText(io, (await loadState(io)).entries, config(), now);
+    const memory = text.split("## Memory\n")[1]!.split("\n\n")[0]!;
+    expect(memory).toContain("memory listed as many items as it gives at once: the counts above may be short");
+  });
+
   it("warns when rule files are off and nothing reaches a memory", async () => {
     const io = memoryIo();
     await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);

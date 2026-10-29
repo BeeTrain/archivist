@@ -985,12 +985,14 @@ var reconcile = async (args) => {
   const { store, entries, stale, cache, verify } = args;
   const items = { ...cache.items };
   const outcome = noOutcome();
-  const present = verify && store.list ? new Map((await store.list()).map((item) => [item.id, item.ref])) : void 0;
+  const listing = verify && store.list ? await store.list() : void 0;
+  const present = listing ? new Map(listing.items.map((item) => [item.id, item])) : void 0;
+  const known = Boolean(store.listsText && listing && !listing.cut);
   for (const e of entries.values()) {
     const sent = items[e.id];
     try {
       if (e.status !== "active") {
-        const ref2 = sent?.ref ?? present?.get(e.id);
+        const ref2 = sent?.ref ?? present?.get(e.id)?.ref;
         if (!ref2) continue;
         await store.remove(ref2);
         delete items[e.id];
@@ -1003,7 +1005,8 @@ var reconcile = async (args) => {
         if (present && !present.has(e.id)) outcome.missing.push(e.id);
         continue;
       }
-      const remote = await store.fetch?.(e.id);
+      const listed = present?.get(e.id);
+      const remote = listed?.text !== void 0 ? { ref: listed.ref, text: listed.text } : known ? void 0 : await store.fetch?.(e.id, sent?.ref ?? listed?.ref);
       const remoteUpdated = remote ? readSignature(remote.text)?.updated : void 0;
       if (remoteUpdated && remoteUpdated > e.updated) {
         outcome.newer.push(e.id);
@@ -1014,7 +1017,7 @@ var reconcile = async (args) => {
         outcome.adopted.push(e.id);
         continue;
       }
-      const ref = await store.put(e.id, text, sent?.ref ?? remote?.ref);
+      const ref = await store.put(e.id, text, sent?.ref ?? remote?.ref, { project: cache.project, id: e.id, updated: e.updated });
       items[e.id] = { ref, text, updated: e.updated };
       outcome.written.push(e.id);
     } catch (err) {
@@ -1024,7 +1027,7 @@ var reconcile = async (args) => {
   if (present) {
     for (const id of present.keys()) if (!entries.has(id)) outcome.unknown.push(id);
   }
-  return { cache: { ...cache, items, ...present ? { missing: outcome.missing, unknown: outcome.unknown } : {} }, outcome };
+  return { cache: { ...cache, items, ...listing ? { missing: outcome.missing, unknown: outcome.unknown, listCut: listing.cut } : {} }, outcome };
 };
 var memoryOutcomeText = (outcome) => {
   const counts = [
@@ -1072,9 +1075,9 @@ var memoryUpToDate = async (io) => {
 };
 var clearMemory = async (io, store, project) => {
   const removed = [];
-  for (const item of await store.list?.() ?? []) {
-    const remote = await store.fetch?.(item.id);
-    if (!remote || readSignature(remote.text)?.project !== project) continue;
+  for (const item of (await store.list?.())?.items ?? []) {
+    const text = item.text ?? (await store.fetch?.(item.id, item.ref))?.text;
+    if (text === void 0 || readSignature(text)?.project !== project) continue;
     await store.remove(item.ref);
     removed.push(item.id);
   }
@@ -1167,6 +1170,7 @@ var memoryLines = (memories) => memories.flatMap((m) => [
   `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
   ...m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : [],
   ...m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : [],
+  ...m.listCut ? ["- memory listed as many items as it gives at once: the counts above may be short"] : [],
   ...m.lastError ? [`- last error: ${m.lastError}`] : []
 ]);
 var healthText = async (io, entries, config, now, extras = {}) => {
@@ -1275,8 +1279,9 @@ var openVikingStore = (call, project) => {
     },
     async list() {
       const reply = await call("list", { uri: folder });
-      if (isNotFound(reply.text)) return [];
-      return textOrThrow(reply).split("\n").map((line) => line.match(/^\[file\] ([^./][^/]*)\.md$/)?.[1]).filter((id) => Boolean(id)).map((id) => ({ id, ref: uriOf(id) }));
+      if (isNotFound(reply.text)) return { items: [] };
+      const items = textOrThrow(reply).split("\n").map((line) => line.match(/^\[file\] ([^./][^/]*)\.md$/)?.[1]).filter((id) => Boolean(id)).map((id) => ({ id, ref: uriOf(id) }));
+      return { items };
     }
   };
 };

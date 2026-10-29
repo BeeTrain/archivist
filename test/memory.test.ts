@@ -178,6 +178,26 @@ describe("reconcile", () => {
     const second = await sync(fake, ledger(gotcha, command), first.cache);
     expect(second.outcome.written).toEqual(["gk-1"]);
   });
+
+  it("takes the text from a listing that carries it and reads no item one by one", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    const { outcome } = await sync(fake, ledger(gotcha, command), emptyCache(), new Set(), true);
+    expect(outcome.adopted).toEqual(["gk-1"]);
+    expect(outcome.written).toEqual(["cmd-1"]);
+    expect(fake.calls).toEqual(["list", "put cmd-1"]);
+  });
+
+  it("hands the store the entry's signature with the text", async () => {
+    const fake = fakeMemoryStore(project);
+    await sync(fake, ledger(gotcha));
+    expect(fake.signatures).toEqual([{ project, id: "gk-1", updated: ts }]);
+  });
+
+  it("notes when memory listed as many items as it gives at once", async () => {
+    const fake = fakeMemoryStore(project, {}, { cut: true });
+    const { cache } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(cache.listCut).toBe(true);
+  });
 });
 
 describe("syncMemory", () => {
@@ -238,6 +258,15 @@ describe("syncMemory", () => {
     expect(await clearMemory(io, fake.store, project)).toEqual(["gk-1"]);
     expect([...fake.items.keys()]).toEqual([fake.refOf("notes")]);
     expect((await loadMemoryCache(io, "fake", project)).items).toEqual({});
+  });
+
+  it("clears from the listing alone when it carries the text", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project, {}, { listsText: true });
+    await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
+    fake.calls.length = 0;
+    expect(await clearMemory(io, fake.store, project)).toEqual(["gk-1"]);
+    expect(fake.calls).toEqual(["list", `remove ${fake.refOf("gk-1")}`]);
   });
 
   it("starts a fresh cache when the project is no longer the one it was written for", async () => {

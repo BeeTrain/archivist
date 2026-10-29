@@ -53,12 +53,13 @@ export const openVikingStore = (call: McpCall, project: string): MemoryStore => 
     },
     async list() {
       const reply = await call("list", { uri: folder });
-      if (isNotFound(reply.text)) return [];
-      return textOrThrow(reply)
+      if (isNotFound(reply.text)) return { items: [] };
+      const items = textOrThrow(reply)
         .split("\n")
         .map((line) => line.match(/^\[file\] ([^./][^/]*)\.md$/)?.[1])
         .filter((id): id is string => Boolean(id))
         .map((id) => ({ id, ref: uriOf(id) }));
+      return { items };
     },
   };
 };

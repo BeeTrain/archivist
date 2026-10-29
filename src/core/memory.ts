@@ -4,12 +4,24 @@ import { withLock } from "./lock.js";
 import { findStale } from "./render.js";
 import type { Entry, EntryType } from "./types.js";
 
+export interface MemoryItem {
+  ref: string;
+  id: string;
+  text?: string;
+}
+
+export interface MemoryListing {
+  items: MemoryItem[];
+  cut?: boolean;
+}
+
 export interface MemoryStore {
   name: string;
-  put(id: string, text: string, ref?: string): Promise<string>;
+  listsText?: boolean;
+  put(id: string, text: string, ref: string | undefined, signature: Signature): Promise<string>;
   remove(ref: string): Promise<void>;
-  fetch?(id: string): Promise<{ ref: string; text: string } | undefined>;
-  list?(): Promise<{ ref: string; id: string }[]>;
+  fetch?(id: string, ref?: string): Promise<{ ref: string; text: string } | undefined>;
+  list?(): Promise<MemoryListing>;
 }
 
 export interface SentItem {
@@ -27,6 +39,7 @@ export interface MemoryCache {
   lastError?: string;
   missing?: string[];
   unknown?: string[];
+  listCut?: boolean;
 }
 
 export interface SyncOutcome {
@@ -113,12 +126,14 @@ export const reconcile = async (args: {
   const { store, entries, stale, cache, verify } = args;
   const items = { ...cache.items };
   const outcome = noOutcome();
-  const present = verify && store.list ? new Map((await store.list()).map((item) => [item.id, item.ref])) : undefined;
+  const listing = verify && store.list ? await store.list() : undefined;
+  const present = listing ? new Map(listing.items.map((item) => [item.id, item])) : undefined;
+  const known = Boolean(store.listsText && listing && !listing.cut);
   for (const e of entries.values()) {
     const sent = items[e.id];
     try {
       if (e.status !== "active") {
-        const ref = sent?.ref ?? present?.get(e.id);
+        const ref = sent?.ref ?? present?.get(e.id)?.ref;
         if (!ref) continue;
         await store.remove(ref);
         delete items[e.id];
@@ -131,7 +146,8 @@ export const reconcile = async (args: {
         if (present && !present.has(e.id)) outcome.missing.push(e.id);
         continue;
       }
-      const remote = await store.fetch?.(e.id);
+      const listed = present?.get(e.id);
+      const remote = listed?.text !== undefined ? { ref: listed.ref, text: listed.text } : known ? undefined : await store.fetch?.(e.id, sent?.ref ?? listed?.ref);
       const remoteUpdated = remote ? readSignature(remote.text)?.updated : undefined;
       if (remoteUpdated && remoteUpdated > e.updated) {
         outcome.newer.push(e.id);
@@ -142,7 +158,7 @@ export const reconcile = async (args: {
         outcome.adopted.push(e.id);
         continue;
       }
-      const ref = await store.put(e.id, text, sent?.ref ?? remote?.ref);
+      const ref = await store.put(e.id, text, sent?.ref ?? remote?.ref, { project: cache.project, id: e.id, updated: e.updated });
       items[e.id] = { ref, text, updated: e.updated };
       outcome.written.push(e.id);
     } catch (err) {
@@ -150,7 +166,7 @@ export const reconcile = async (args: {
     }
   }
   if (present) for (const id of present.keys()) if (!entries.has(id)) outcome.unknown.push(id);
-  return { cache: { ...cache, items, ...(present ? { missing: outcome.missing, unknown: outcome.unknown } : {}) }, outcome };
+  return { cache: { ...cache, items, ...(listing ? { missing: outcome.missing, unknown: outcome.unknown, listCut: listing.cut } : {}) }, outcome };
 };
 
 export const memoryOutcomeText = (outcome: SyncOutcome): string => {
@@ -205,9 +221,9 @@ export const memoryUpToDate = async (io: Io): Promise<boolean> => {
 
 export const clearMemory = async (io: Io, store: MemoryStore, project: string): Promise<string[]> => {
   const removed: string[] = [];
-  for (const item of (await store.list?.()) ?? []) {
-    const remote = await store.fetch?.(item.id);
-    if (!remote || readSignature(remote.text)?.project !== project) continue;
+  for (const item of (await store.list?.())?.items ?? []) {
+    const text = item.text ?? (await store.fetch?.(item.id, item.ref))?.text;
+    if (text === undefined || readSignature(text)?.project !== project) continue;
     await store.remove(item.ref);
     removed.push(item.id);
   }
