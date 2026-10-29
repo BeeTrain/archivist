@@ -229,13 +229,8 @@ async function openVikingServer($: any): Promise<string | undefined> {
   return findOpenVikingServer((usage.context?.breakdown?.mcpTools ?? []) as { name: string; serverName: string }[])
 }
 
-async function gitRemote($: any, base: string): Promise<string | undefined> {
-  const run = await $.process.run(['git', '-C', base, 'remote', 'get-url', 'origin'])
-  return run.exitCode === 0 ? String(run.stdout ?? '').trim() || undefined : undefined
-}
-
-async function gitConfigRemote($: any, base: string): Promise<string | undefined> {
-  const run = await $.process.run(['git', '-C', base, 'config', '--get', 'remote.origin.url'])
+async function gitOutput($: any, base: string, args: string[]): Promise<string | undefined> {
+  const run = await $.process.run(['git', '-C', base, ...args])
   return run.exitCode === 0 ? String(run.stdout ?? '').trim() || undefined : undefined
 }
 
@@ -264,8 +259,9 @@ function mem0Fetcher($: any): Fetcher {
 
 async function mem0Store($: any, base: string, choice: Extract<MemoryChoice, { kind: 'mem0' }>, project: string): Promise<MemoryStore> {
   const scope = await mem0Scope({
-    rawRemote: await gitConfigRemote($, base),
+    rawRemote: await gitOutput($, base, ['config', '--get', 'remote.origin.url']),
     root: base,
+    topLevel: await gitOutput($, base, ['rev-parse', '--show-toplevel']),
     projectIdEnv: await $.env.get('MEM0_PROJECT_ID'),
     userIdCandidates: await mem0UserIds($),
   })
@@ -279,7 +275,7 @@ async function mem0Store($: any, base: string, choice: Extract<MemoryChoice, { k
 }
 
 async function memoryProject($: any, base: string, config: Config): Promise<string> {
-  return config.memory.project !== 'auto' ? config.memory.project : projectId(await gitRemote($, base), base)
+  return config.memory.project !== 'auto' ? config.memory.project : projectId(await gitOutput($, base, ['remote', 'get-url', 'origin']), base)
 }
 
 async function memoryPlace($: any, base: string, config: Config): Promise<MemoryPlace> {

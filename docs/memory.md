@@ -49,8 +49,8 @@ Archivist ходит в mem0 по REST со своим ключом и пише�
 
 **Скоуп** такой же, какой вычисляет плагин mem0 для Claude Code; у плагинов для Codex и Cursor та же логика. Поэтому recall этих плагинов в облаке находит записи Archivist.
 
-- `app_id` — `MEM0_PROJECT_ID`, иначе `<owner>-<repo>` из `git config --get remote.origin.url`, иначе имя папки.
-- `agent_id` — `<app_id>-<первые 10 hex от sha256 нормализованного remote>`; без remote — `local-<app_id>-<первые 10 hex от sha256 пути проекта>`.
+- `app_id` — `MEM0_PROJECT_ID`, иначе `<owner>-<repo>` из `git config --get remote.origin.url`, иначе имя корневой папки репозитория.
+- `agent_id` — `<app_id>-<первые 10 hex от sha256 нормализованного remote>`; без remote — `local-<app_id>-<первые 10 hex от sha256 пути корня репозитория>` (`git rev-parse --show-toplevel`, даже если сессия начата в подпапке).
 - `user_id` — поле `user_id` плагина mem0 в `/config`, иначе `MEM0_CODE_USER_ID`, `MEM0_USER_ID`, `MEM0_RESOLVED_USER_ID`, `USER`, `USERNAME`, иначе `default`.
 
 **Metadata** элемента плоская, потому что облако фильтрует только по ключам верхнего уровня: `archivist_key` (`archivist/<проект>/<id>`), `archivist_project`, `archivist_id`, `archivist_updated`. Подпись по-прежнему стоит и последней строкой текста.

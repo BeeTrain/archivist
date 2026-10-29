@@ -12,7 +12,8 @@ export const normalizeRemote = (remote: string): string => {
   if (url) {
     const [, scheme, netloc, path, query = "", fragment = ""] = url;
     const [, host = "", port] = netloc!.slice(netloc!.lastIndexOf("@") + 1).match(/^(.*?)(?::(\d+))?$/)!;
-    r = `${scheme!.toLowerCase()}://${host.toLowerCase()}${port ? `:${Number(port)}` : ""}${path}${query.length > 1 ? query : ""}${fragment.length > 1 ? fragment : ""}`;
+    const hostname = host.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+    r = `${scheme!.toLowerCase()}://${hostname}${Number(port) ? `:${Number(port)}` : ""}${path}${query.length > 1 ? query : ""}${fragment.length > 1 ? fragment : ""}`;
   }
   return r.replace(/\/+$/, "");
 };
@@ -42,13 +43,15 @@ const hash10 = async (text: string): Promise<string> => {
 export const mem0Scope = async (args: {
   rawRemote: string | undefined;
   root: string;
+  topLevel: string | undefined;
   projectIdEnv: string | undefined;
   userIdCandidates: readonly (string | undefined)[];
 }): Promise<Mem0Scope> => {
   const rawRemote = args.rawRemote ?? "";
-  const identity = normalizeRemote(rawRemote) || `local:${args.root}`;
-  const appId = appIdOf(rawRemote, identity, args.root, args.projectIdEnv);
-  const agentId = identity.startsWith("local:") ? `local-${appId}-${await hash10(args.root)}` : `${appId}-${await hash10(identity)}`;
+  const root = args.topLevel?.trim() || args.root;
+  const identity = normalizeRemote(rawRemote) || `local:${root}`;
+  const appId = appIdOf(rawRemote, identity, root, args.projectIdEnv);
+  const agentId = identity.startsWith("local:") ? `local-${appId}-${await hash10(root)}` : `${appId}-${await hash10(identity)}`;
   const userId = args.userIdCandidates.map(scopeValue).find(Boolean) ?? "default";
   return { appId, agentId, userId };
 };

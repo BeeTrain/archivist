@@ -1346,7 +1346,8 @@ var normalizeRemote = (remote) => {
   if (url) {
     const [, scheme, netloc, path, query = "", fragment = ""] = url;
     const [, host = "", port] = netloc.slice(netloc.lastIndexOf("@") + 1).match(/^(.*?)(?::(\d+))?$/);
-    r = `${scheme.toLowerCase()}://${host.toLowerCase()}${port ? `:${Number(port)}` : ""}${path}${query.length > 1 ? query : ""}${fragment.length > 1 ? fragment : ""}`;
+    const hostname = host.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+    r = `${scheme.toLowerCase()}://${hostname}${Number(port) ? `:${Number(port)}` : ""}${path}${query.length > 1 ? query : ""}${fragment.length > 1 ? fragment : ""}`;
   }
   return r.replace(/\/+$/, "");
 };
@@ -1371,9 +1372,10 @@ var hash10 = async (text) => {
 };
 var mem0Scope = async (args) => {
   const rawRemote = args.rawRemote ?? "";
-  const identity = normalizeRemote(rawRemote) || `local:${args.root}`;
-  const appId = appIdOf(rawRemote, identity, args.root, args.projectIdEnv);
-  const agentId = identity.startsWith("local:") ? `local-${appId}-${await hash10(args.root)}` : `${appId}-${await hash10(identity)}`;
+  const root2 = args.topLevel?.trim() || args.root;
+  const identity = normalizeRemote(rawRemote) || `local:${root2}`;
+  const appId = appIdOf(rawRemote, identity, root2, args.projectIdEnv);
+  const agentId = identity.startsWith("local:") ? `local-${appId}-${await hash10(root2)}` : `${appId}-${await hash10(identity)}`;
   const userId = args.userIdCandidates.map(scopeValue).find(Boolean) ?? "default";
   return { appId, agentId, userId };
 };
@@ -2252,12 +2254,8 @@ async function openVikingServer($) {
   const usage = await $.session.usage({ breakdown: "summary" });
   return findOpenVikingServer(usage.context?.breakdown?.mcpTools ?? []);
 }
-async function gitRemote($, base) {
-  const run = await $.process.run(["git", "-C", base, "remote", "get-url", "origin"]);
-  return run.exitCode === 0 ? String(run.stdout ?? "").trim() || void 0 : void 0;
-}
-async function gitConfigRemote($, base) {
-  const run = await $.process.run(["git", "-C", base, "config", "--get", "remote.origin.url"]);
+async function gitOutput($, base, args) {
+  const run = await $.process.run(["git", "-C", base, ...args]);
   return run.exitCode === 0 ? String(run.stdout ?? "").trim() || void 0 : void 0;
 }
 async function optionRow($, key) {
@@ -2282,8 +2280,9 @@ function mem0Fetcher($) {
 }
 async function mem0Store($, base, choice, project) {
   const scope = await mem0Scope({
-    rawRemote: await gitConfigRemote($, base),
+    rawRemote: await gitOutput($, base, ["config", "--get", "remote.origin.url"]),
     root: base,
+    topLevel: await gitOutput($, base, ["rev-parse", "--show-toplevel"]),
     projectIdEnv: await $.env.get("MEM0_PROJECT_ID"),
     userIdCandidates: await mem0UserIds($)
   });
@@ -2292,7 +2291,7 @@ async function mem0Store($, base, choice, project) {
   return choice.cloud ? mem0CloudStore(http, scope, project) : mem0ServerStore(http, scope, project, mem0StoreName(choice.base));
 }
 async function memoryProject($, base, config) {
-  return config.memory.project !== "auto" ? config.memory.project : projectId(await gitRemote($, base), base);
+  return config.memory.project !== "auto" ? config.memory.project : projectId(await gitOutput($, base, ["remote", "get-url", "origin"]), base);
 }
 async function memoryPlace($, base, config) {
   return placeMemory(memoryOptions, {
