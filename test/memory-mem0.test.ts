@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Mem0Scope } from "../src/core/mem0-scope.js";
-import { MemoryRefused } from "../src/core/memory.js";
+import { MemoryRefused, MemoryRejected } from "../src/core/memory.js";
 import { isMem0Cloud, MEM0_CLOUD_URL, mem0CloudStore, mem0ServerStore, mem0StoreName, mem0Transport, type Fetcher, type HttpCall, type HttpReply } from "../src/core/memory-mem0.js";
 
 const project = "github.com/beetrain/archivist";
@@ -147,6 +147,26 @@ describe("the mem0 cloud store", () => {
     await expect(failure).rejects.toThrow(`(HTTP ${status}): Invalid API key`);
   });
 
+  it.each([400, 404, 422])("turns down a request mem0 answers with HTTP %i: the same request would not pass", async (status) => {
+    const failure = mem0CloudStore(fakeHttp([json(status, { detail: "BYOK required" })]).http, scope, project).put("gk-1", "# T\n", undefined, signature);
+    await expect(failure).rejects.toBeInstanceOf(MemoryRejected);
+    await expect(failure).rejects.toThrow(`mem0 rejected the request (HTTP ${status}): BYOK required`);
+  });
+
+  it("keeps a server error for the next try", async () => {
+    const error = await mem0CloudStore(fakeHttp([json(503, { detail: "busy" })]).http, scope, project)
+      .put("gk-1", "# T\n", undefined, signature)
+      .catch((e: unknown) => e);
+    expect(error).not.toBeInstanceOf(MemoryRejected);
+    expect(String(error)).toContain("mem0 request failed (HTTP 503): busy");
+  });
+
+  it("turns down an add that mem0 answers without storing anything", async () => {
+    const failure = mem0CloudStore(fakeHttp([json(200, { results: [] })]).http, scope, project).put("gk-1", "# T\n", undefined, signature);
+    await expect(failure).rejects.toBeInstanceOf(MemoryRejected);
+    await expect(failure).rejects.toThrow("mem0 stored nothing");
+  });
+
   it("gives a short reason when mem0 answers with something that is not JSON", async () => {
     const error = await mem0CloudStore(fakeHttp([{ status: 502, text: `<html>${"x".repeat(5000)}</html>` }]).http, scope, project)
       .remove("uuid-1")
@@ -161,6 +181,7 @@ describe("the mem0 cloud store", () => {
       .catch((e: unknown) => e);
     expect(String(error)).toContain("mem0 answered with something that is not JSON (HTTP 200): <html>sign in to the proxy");
     expect(String(error).length).toBeLessThan(300);
+    expect(error).toBeInstanceOf(MemoryRejected);
   });
 
   it("says its reads cost quota and its listing carries the text", () => {

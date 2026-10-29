@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appendLedger } from "../src/core/ledger.js";
-import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
+import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, MemoryRejected, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
 import type { Entry } from "../src/core/types.js";
 import { entry, fakeMemoryStore, memoryIo } from "./helpers.js";
 
@@ -343,6 +343,33 @@ describe("syncMemory", () => {
     fake.refusePut.clear();
     expect((await syncMemory({ io, store: fake.store, project, mode: "start", now: later }))?.written.sort()).toEqual(["cmd-1", "gk-1"]);
     expect((await loadMemoryCache(io, "fake", project)).paused).toBeUndefined();
+  });
+
+  it("sends the other entries when memory turns one down, then waits for the next session", async () => {
+    const io = await withLedger(gotcha, command);
+    const fake = fakeMemoryStore(project);
+    fake.rejectPut.add("gk-1");
+    const first = await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    expect(first?.written).toEqual(["cmd-1"]);
+    expect(first?.rejected).toBe("mem0 rejected the request (HTTP 400): BYOK required");
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBe("mem0 rejected the request (HTTP 400): BYOK required");
+    fake.calls.length = 0;
+    const procedure = entry({ id: "proc-1", type: "procedure", title: "Release", content: "1. npm run check", created: later, updated: later });
+    await appendLedger(io, [{ v: 1, ts: later, op: "add", entry: procedure }]);
+    expect(await syncMemory({ io, store: fake.store, project, mode: "fast", now: later })).toBeUndefined();
+    expect(fake.calls).toEqual([]);
+    fake.rejectPut.clear();
+    expect((await syncMemory({ io, store: fake.store, project, mode: "start", now: later }))?.written.sort()).toEqual(["gk-1", "proc-1"]);
+  });
+
+  it("stops and waits for the next session when memory turns down its listing", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.listErrors.push(new MemoryRejected("mem0 rejected the request (HTTP 400): bad filter"));
+    const outcome = await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    expect(outcome?.refused).toBe("mem0 rejected the request (HTTP 400): bad filter");
+    expect(fake.calls).toEqual(["list"]);
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBe("mem0 rejected the request (HTTP 400): bad filter");
   });
 
   it("does not count a refused run as the day's check of memory", async () => {

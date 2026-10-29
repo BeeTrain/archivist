@@ -1,5 +1,5 @@
 import type { Mem0Scope } from "./mem0-scope.js";
-import { MemoryRefused, readSignature, type MemoryItem, type MemoryListing, type MemoryStore, type Signature } from "./memory.js";
+import { MemoryRefused, MemoryRejected, readSignature, type MemoryItem, type MemoryListing, type MemoryStore, type Signature } from "./memory.js";
 
 export interface HttpReply {
   status: number;
@@ -76,6 +76,7 @@ const reasonIn = (text: string): string => saidIn(text).replace(/\s+/g, " ").tri
 const succeeded = (reply: HttpReply): HttpReply => {
   if (reply.status >= 200 && reply.status < 300) return reply;
   if (REFUSED_STATUSES.has(reply.status)) throw new MemoryRefused(`mem0 refused the request (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
+  if (reply.status >= 400 && reply.status < 500) throw new MemoryRejected(`mem0 rejected the request (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
   throw new Error(`mem0 request failed (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
 };
 
@@ -84,7 +85,7 @@ const answerOf = <T>(reply: HttpReply): T | undefined => {
   try {
     return (JSON.parse(text || "null") as T | null) ?? undefined;
   } catch {
-    throw new Error(`mem0 answered with something that is not JSON (HTTP ${reply.status}): ${reasonIn(text)}`);
+    throw new MemoryRejected(`mem0 answered with something that is not JSON (HTTP ${reply.status}): ${reasonIn(text)}`);
   }
 };
 
@@ -115,7 +116,7 @@ const metadataOf = (signature: Signature) => ({
 
 const addedId = (reply: HttpReply): string => {
   const added = answerOf<{ results?: { id?: string }[] }>(reply)?.results?.[0]?.id;
-  if (!added) throw new Error("mem0 stored nothing");
+  if (!added) throw new MemoryRejected("mem0 stored nothing");
   return added;
 };
 

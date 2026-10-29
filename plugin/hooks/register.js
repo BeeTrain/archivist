@@ -943,6 +943,8 @@ var expireProposals = async (io, config, now) => {
 // src/core/memory.ts
 var MemoryRefused = class extends Error {
 };
+var MemoryRejected = class extends Error {
+};
 var segment = (s) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 var localProject = (path) => `local/${segment(path.replace(/\.git$/, "").split("/").filter(Boolean).at(-1) ?? "project") || "project"}`;
 var hostAndPath = (remote) => {
@@ -997,7 +999,7 @@ var reconcile = async (args) => {
   try {
     listing = verify && store.list ? await store.list() : void 0;
   } catch (err) {
-    if (err instanceof MemoryRefused) return { cache, outcome: { ...outcome, refused: err.message } };
+    if (err instanceof MemoryRefused || err instanceof MemoryRejected) return { cache, outcome: { ...outcome, refused: err.message } };
     throw err;
   }
   const present = listing ? copiesById(listing) : void 0;
@@ -1048,6 +1050,7 @@ var reconcile = async (args) => {
         outcome.refused = err.message;
         break;
       }
+      if (err instanceof MemoryRejected) outcome.rejected ??= err.message;
       outcome.failed.push({ id: e.id, error: messageOf(err) });
     }
   }
@@ -1132,13 +1135,14 @@ var syncMemory = async (args) => {
   const entries = foldLedger(parseLedger(ledgerText).records);
   const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify });
   const failure = outcome.failed[0];
+  const paused = outcome.refused ?? outcome.rejected;
   const saved = {
     ...next,
     ledgerMark: mark2,
     lastSync: now,
-    ...verify && !outcome.refused ? { lastVerify: now } : {},
+    ...verify && !paused ? { lastVerify: now } : {},
     lastError: outcome.refused ?? (failure ? `${failure.id}: ${failure.error}` : void 0),
-    paused: outcome.refused
+    paused
   };
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
   return outcome;
@@ -1419,6 +1423,7 @@ var reasonIn = (text) => saidIn(text).replace(/\s+/g, " ").trim().slice(0, 200);
 var succeeded = (reply) => {
   if (reply.status >= 200 && reply.status < 300) return reply;
   if (REFUSED_STATUSES.has(reply.status)) throw new MemoryRefused(`mem0 refused the request (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
+  if (reply.status >= 400 && reply.status < 500) throw new MemoryRejected(`mem0 rejected the request (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
   throw new Error(`mem0 request failed (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
 };
 var answerOf = (reply) => {
@@ -1426,7 +1431,7 @@ var answerOf = (reply) => {
   try {
     return JSON.parse(text || "null") ?? void 0;
   } catch {
-    throw new Error(`mem0 answered with something that is not JSON (HTTP ${reply.status}): ${reasonIn(text)}`);
+    throw new MemoryRejected(`mem0 answered with something that is not JSON (HTTP ${reply.status}): ${reasonIn(text)}`);
   }
 };
 var itemsOf = (memories) => memories.flatMap((m) => {
@@ -1446,7 +1451,7 @@ var metadataOf = (signature) => ({
 });
 var addedId = (reply) => {
   const added = answerOf(reply)?.results?.[0]?.id;
-  if (!added) throw new Error("mem0 stored nothing");
+  if (!added) throw new MemoryRejected("mem0 stored nothing");
   return added;
 };
 var removeAt = async (http, path) => {

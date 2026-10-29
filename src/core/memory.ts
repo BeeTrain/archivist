@@ -6,6 +6,8 @@ import type { Entry, EntryType } from "./types.js";
 
 export class MemoryRefused extends Error {}
 
+export class MemoryRejected extends Error {}
+
 export interface MemoryItem {
   ref: string;
   id: string;
@@ -57,6 +59,7 @@ export interface SyncOutcome {
   unknown: string[];
   failed: { id: string; error: string }[];
   refused?: string;
+  rejected?: string;
 }
 
 export interface Signature {
@@ -147,7 +150,7 @@ export const reconcile = async (args: {
   try {
     listing = verify && store.list ? await store.list() : undefined;
   } catch (err) {
-    if (err instanceof MemoryRefused) return { cache, outcome: { ...outcome, refused: err.message } };
+    if (err instanceof MemoryRefused || err instanceof MemoryRejected) return { cache, outcome: { ...outcome, refused: err.message } };
     throw err;
   }
   const present = listing ? copiesById(listing) : undefined;
@@ -198,6 +201,7 @@ export const reconcile = async (args: {
         outcome.refused = err.message;
         break;
       }
+      if (err instanceof MemoryRejected) outcome.rejected ??= err.message;
       outcome.failed.push({ id: e.id, error: messageOf(err) });
     }
   }
@@ -292,13 +296,14 @@ export const syncMemory = async (args: { io: Io; store: MemoryStore; project: st
   const entries = foldLedger(parseLedger(ledgerText).records);
   const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify });
   const failure = outcome.failed[0];
+  const paused = outcome.refused ?? outcome.rejected;
   const saved: MemoryCache = {
     ...next,
     ledgerMark: mark,
     lastSync: now,
-    ...(verify && !outcome.refused ? { lastVerify: now } : {}),
+    ...(verify && !paused ? { lastVerify: now } : {}),
     lastError: outcome.refused ?? (failure ? `${failure.id}: ${failure.error}` : undefined),
-    paused: outcome.refused,
+    paused,
   };
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
   return outcome;
