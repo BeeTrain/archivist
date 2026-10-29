@@ -1,5 +1,5 @@
 import type { Mem0Scope } from "./mem0-scope.js";
-import { MemoryRefused, readSignature, type MemoryItem, type MemoryStore, type Signature } from "./memory.js";
+import { MemoryRefused, readSignature, type MemoryItem, type MemoryListing, type MemoryStore, type Signature } from "./memory.js";
 
 export interface HttpReply {
   status: number;
@@ -113,6 +113,17 @@ const metadataOf = (signature: Signature) => ({
   archivist_updated: signature.updated,
 });
 
+const addedId = (reply: HttpReply): string => {
+  const added = answerOf<{ results?: { id?: string }[] }>(reply)?.results?.[0]?.id;
+  if (!added) throw new Error("mem0 stored nothing");
+  return added;
+};
+
+const removeAt = async (http: HttpCall, path: string): Promise<void> => {
+  const reply = await http("DELETE", path);
+  if (reply.status !== 404) succeeded(reply);
+};
+
 const LIST_FIELDS = ["id", "memory", "metadata", "updated_at"];
 
 export const mem0CloudStore = (http: HttpCall, scope: Mem0Scope, project: string): MemoryStore => {
@@ -127,16 +138,13 @@ export const mem0CloudStore = (http: HttpCall, scope: Mem0Scope, project: string
       if (!answer?.next || !results.length) return items;
     }
   };
-  const remove = async (ref: string): Promise<void> => {
-    const reply = await http("DELETE", `/v1/memories/${encodeURIComponent(ref)}/`);
-    if (reply.status !== 404) succeeded(reply);
-  };
+  const remove = (ref: string): Promise<void> => removeAt(http, `/v1/memories/${encodeURIComponent(ref)}/`);
   return {
     name: "mem0",
     readsCostQuota: true,
     listsText: true,
     async put(_id, text, ref, signature) {
-      const answer = answerOf<{ results?: { id?: string }[] }>(
+      const added = addedId(
         await http("POST", "/v3/memories/add/", {
           messages: [{ role: "user", content: text }],
           infer: false,
@@ -147,8 +155,6 @@ export const mem0CloudStore = (http: HttpCall, scope: Mem0Scope, project: string
           metadata: metadataOf(signature),
         }),
       );
-      const added = answer?.results?.[0]?.id;
-      if (!added) throw new Error("mem0 stored nothing");
       if (ref && ref !== added) {
         try {
           await remove(ref);
@@ -161,5 +167,39 @@ export const mem0CloudStore = (http: HttpCall, scope: Mem0Scope, project: string
     remove,
     fetch: async (id) => newestOf(await listWhere({ archivist_key: `archivist/${project}/${id}` })),
     list: async () => ({ items: await listWhere({ archivist_project: project }) }),
+  };
+};
+
+const SERVER_LIST_LIMIT = 1000;
+
+export const mem0ServerStore = (http: HttpCall, scope: Mem0Scope, project: string, name: string): MemoryStore => {
+  const add = async (text: string, signature: Signature): Promise<string> =>
+    addedId(await http("POST", "/memories", { messages: [{ role: "user", content: text }], infer: false, agent_id: scope.agentId, user_id: scope.userId, metadata: metadataOf(signature) }));
+  const list = async (): Promise<MemoryListing> => {
+    const answer = answerOf<Mem0Memory[] | { results?: Mem0Memory[] }>(await http("GET", `/memories?agent_id=${encodeURIComponent(scope.agentId)}&top_k=${SERVER_LIST_LIMIT}`));
+    const rows = Array.isArray(answer) ? answer : (answer?.results ?? []);
+    return { items: itemsOf(rows.filter((row) => row.metadata?.archivist_project === project)), cut: rows.length >= SERVER_LIST_LIMIT };
+  };
+  return {
+    name,
+    readsCostQuota: false,
+    listsText: true,
+    async put(_id, text, ref, signature) {
+      if (!ref) return add(text, signature);
+      const reply = await http("PUT", `/memories/${encodeURIComponent(ref)}`, { text, metadata: metadataOf(signature) });
+      if (reply.status === 404) return add(text, signature);
+      succeeded(reply);
+      return ref;
+    },
+    remove: (ref) => removeAt(http, `/memories/${encodeURIComponent(ref)}`),
+    async fetch(id, ref) {
+      if (ref) {
+        const reply = await http("GET", `/memories/${encodeURIComponent(ref)}`);
+        const found = reply.status === 404 ? undefined : answerOf<Mem0Memory>(reply);
+        if (found?.metadata?.archivist_key === `archivist/${project}/${id}` && typeof found.memory === "string") return { ref: found.id ?? ref, text: found.memory };
+      }
+      return newestOf((await list()).items.filter((item) => item.id === id));
+    },
+    list,
   };
 };

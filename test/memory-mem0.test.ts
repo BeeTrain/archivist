@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Mem0Scope } from "../src/core/mem0-scope.js";
 import { MemoryRefused } from "../src/core/memory.js";
-import { isMem0Cloud, MEM0_CLOUD_URL, mem0CloudStore, mem0StoreName, mem0Transport, type Fetcher, type HttpCall, type HttpReply } from "../src/core/memory-mem0.js";
+import { isMem0Cloud, MEM0_CLOUD_URL, mem0CloudStore, mem0ServerStore, mem0StoreName, mem0Transport, type Fetcher, type HttpCall, type HttpReply } from "../src/core/memory-mem0.js";
 
 const project = "github.com/beetrain/archivist";
 const scope: Mem0Scope = { appId: "BeeTrain-archivist", agentId: "BeeTrain-archivist-0123456789", userId: "dev-user" };
@@ -165,5 +165,78 @@ describe("the mem0 cloud store", () => {
 
   it("says its reads cost quota and its listing carries the text", () => {
     expect(mem0CloudStore(fakeHttp([]).http, scope, project)).toMatchObject({ name: "mem0", readsCostQuota: true, listsText: true });
+  });
+});
+
+describe("the store on an own mem0 server", () => {
+  const store = (http: HttpCall) => mem0ServerStore(http, scope, project, "mem0-localhost-8888");
+
+  it("adds an entry verbatim with the scope, without app_id", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [{ id: "m-1", event: "ADD" }] })]);
+    expect(await store(http).put("gk-1", "# Title\n", undefined, signature)).toBe("m-1");
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/memories",
+        body: { messages: [{ role: "user", content: "# Title\n" }], infer: false, agent_id: scope.agentId, user_id: "dev-user", metadata },
+      },
+    ]);
+  });
+
+  it("changes an entry in place and keeps its id", async () => {
+    const { calls, http } = fakeHttp([json(200, { message: "Memory updated successfully!" })]);
+    expect(await store(http).put("gk-1", "# New\n", "m-1", signature)).toBe("m-1");
+    expect(calls).toEqual([{ method: "PUT", path: "/memories/m-1", body: { text: "# New\n", metadata } }]);
+  });
+
+  it("adds the entry again when the item to change is gone", async () => {
+    const { calls, http } = fakeHttp([json(404, { detail: "Memory with id m-1 not found" }), json(200, { results: [{ id: "m-2" }] })]);
+    expect(await store(http).put("gk-1", "# New\n", "m-1", signature)).toBe("m-2");
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(["PUT /memories/m-1", "POST /memories"]);
+  });
+
+  it("lists the project's items with their text in one request for as many as the server gives", async () => {
+    const { calls, http } = fakeHttp([
+      json(200, {
+        results: [
+          { id: "m-1", memory: "# gk-1\n", metadata },
+          { id: "m-9", memory: "another project", metadata: { ...metadata, archivist_project: "github.com/someone/else" } },
+          { id: "m-8", memory: "not Archivist's", metadata: {} },
+        ],
+      }),
+    ]);
+    expect(await store(http).list!()).toEqual({ items: [{ ref: "m-1", id: "gk-1", text: "# gk-1\n" }], cut: false });
+    expect(calls[0]).toEqual({ method: "GET", path: `/memories?agent_id=${encodeURIComponent(scope.agentId)}&top_k=1000` });
+  });
+
+  it("takes a listing the server sends as a bare array", async () => {
+    const { http } = fakeHttp([json(200, [{ id: "m-1", memory: "# gk-1\n", metadata }])]);
+    expect((await store(http).list!()).items).toEqual([{ ref: "m-1", id: "gk-1", text: "# gk-1\n" }]);
+  });
+
+  it("says the listing may be cut when it reached the server's limit", async () => {
+    const results = Array.from({ length: 1000 }, (_, i) => ({ id: `m-${i}`, memory: "x", metadata: { ...metadata, archivist_id: `e-${i}` } }));
+    expect((await store(fakeHttp([json(200, { results })]).http).list!()).cut).toBe(true);
+  });
+
+  it("reads an entry by its id, and searches the listing when that id is gone", async () => {
+    expect(await store(fakeHttp([json(200, { id: "m-1", memory: "# gk-1\n", metadata })]).http).fetch!("gk-1", "m-1")).toEqual({ ref: "m-1", text: "# gk-1\n" });
+    const gone = fakeHttp([json(200, null), json(200, { results: [{ id: "m-2", memory: "# gk-1 again\n", metadata }] })]);
+    expect(await store(gone.http).fetch!("gk-1", "m-1")).toEqual({ ref: "m-2", text: "# gk-1 again\n" });
+  });
+
+  it("searches the listing when reading by id answers 404", async () => {
+    const gone = fakeHttp([json(404, { detail: "Memory with id m-1 not found" }), json(200, { results: [{ id: "m-2", memory: "# gk-1 again\n", metadata }] })]);
+    expect(await store(gone.http).fetch!("gk-1", "m-1")).toEqual({ ref: "m-2", text: "# gk-1 again\n" });
+  });
+
+  it("counts deleting an item that is gone as done", async () => {
+    const { calls, http } = fakeHttp([json(404, { detail: "Memory with id m-1 not found" })]);
+    await expect(store(http).remove("m-1")).resolves.toBeUndefined();
+    expect(calls[0]).toEqual({ method: "DELETE", path: "/memories/m-1" });
+  });
+
+  it("reads for free and carries the text in its listing", () => {
+    expect(store(fakeHttp([]).http)).toMatchObject({ name: "mem0-localhost-8888", readsCostQuota: false, listsText: true });
   });
 });
