@@ -1215,13 +1215,15 @@ var lint = async (io, entries, config) => {
   return out;
 };
 var WEEK = 7 * 864e5;
-var memoryLines = (memories) => memories.flatMap((m) => [
+var inUse = (m, store) => store === void 0 || m.store === store;
+var memoryInUseLines = (m) => [
   `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
   ...m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : [],
   ...m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : [],
   ...m.listCut ? ["- memory listed as many items as it gives at once: the counts above may be short"] : [],
   ...m.paused ? [`- paused until the next session or /archivist memory sync: ${m.paused}`] : m.lastError ? [`- last error: ${m.lastError}`] : []
-]);
+];
+var memoryLines = (memories, store) => memories.flatMap((m) => inUse(m, store) ? memoryInUseLines(m) : [`- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries sent earlier; not in use now, so not synced`]);
 var healthText = async (io, entries, config, now, extras = {}) => {
   const since = new Date(now.getTime() - WEEK).toISOString();
   const active = activeEntries(entries);
@@ -1268,12 +1270,12 @@ var healthText = async (io, entries, config, now, extras = {}) => {
     ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
   ];
   const memories = await loadMemoryCaches(io);
-  if (memories.length || extras.memoryNote) lines.push("", "## Memory", ...extras.memoryNote ? [`- ${extras.memoryNote}`] : [], ...memoryLines(memories));
+  if (memories.length || extras.memoryNote) lines.push("", "## Memory", ...extras.memoryNote ? [`- ${extras.memoryNote}`] : [], ...memoryLines(memories, extras.memoryInUse));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
   const todo = [];
   if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
   if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
-  if (memories.some((m) => m.lastError)) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
+  if (memories.some((m) => m.lastError && inUse(m, extras.memoryInUse))) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
   if (!config.rules.files && !memories.some((m) => Object.keys(m.items).length))
     todo.push("rule files are off and no memory has received the entries: no agent sees them (connect a memory plugin, or set rules.files to true)");
   if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
@@ -2354,7 +2356,7 @@ async function memoryCommand($, io, config, action) {
       ].join(" ");
     }
     const head2 = place.choice.kind === "none" ? place.choice.why : `Memory: ${at}`;
-    return [head2, ...block && block !== head2 ? [block] : [], ...memoryLines(await loadMemoryCaches(io))].join("\n");
+    return [head2, ...block && block !== head2 ? [block] : [], ...memoryLines(await loadMemoryCaches(io), storeNameFor(memoryOptions) ?? null)].join("\n");
   } catch (err) {
     return `Memory: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -2582,7 +2584,8 @@ function register(on, options) {
         text: await healthText(io, (await loadState(io)).entries, cfg, /* @__PURE__ */ new Date(), {
           log: await $.store.get(logKey(root)) ?? [],
           spentToday: await $.store.get(BUDGET_KEY + today()) ?? 0,
-          memoryNote: await memoryNote($, cfg)
+          memoryNote: await memoryNote($, cfg),
+          memoryInUse: storeNameFor(memoryOptions) ?? null
         })
       };
     if (verb === "recall") return { text: recallText((await loadState(io)).entries, rest.join(" ")) };

@@ -381,7 +381,7 @@ async function memoryCommand($: any, io: Io, config: Config, action: string): Pr
       ].join(' ')
     }
     const head = place.choice.kind === 'none' ? place.choice.why : `Memory: ${at}`
-    return [head, ...(block && block !== head ? [block] : []), ...memoryLines(await loadMemoryCaches(io))].join('\n')
+    return [head, ...(block && block !== head ? [block] : []), ...memoryLines(await loadMemoryCaches(io), storeNameFor(memoryOptions) ?? null)].join('\n')
   } catch (err) {
     return `Memory: ${err instanceof Error ? err.message : String(err)}`
   }
@@ -637,6 +637,7 @@ export function register(on: On, options: PluginOptions): void {
           log: ((await $.store.get(logKey(root))) as string[] | undefined) ?? [],
           spentToday: ((await $.store.get(BUDGET_KEY + today())) as number | undefined) ?? 0,
           memoryNote: await memoryNote($, cfg),
+          memoryInUse: storeNameFor(memoryOptions) ?? null,
         }),
       }
     if (verb === 'recall') return { text: recallText((await loadState(io)).entries, rest.join(' ')) }

@@ -79,6 +79,20 @@ describe("health of the memory projection", () => {
     expect(memory).not.toContain("last error:");
   });
 
+  it("tells a memory no longer in use apart, and keeps its old failure out of what to do", async () => {
+    const io = memoryIo();
+    await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);
+    const refusal = "mem0 refused the request (HTTP 401): Invalid API key";
+    const sent = { "gk-1": { ref: "uuid-1", text: "x", updated: day(1) } };
+    io.files.set(memoryCachePath("mem0"), JSON.stringify({ store: "mem0", project: "github.com/beetrain/archivist", items: sent, lastSync: day(1), lastError: refusal, paused: refusal }));
+    io.files.set(memoryCachePath("openviking"), JSON.stringify({ store: "openviking", project: "github.com/beetrain/archivist", items: {}, lastSync: day(0) }));
+    const text = await healthText(io, (await loadState(io)).entries, config(), now, { memoryInUse: "openviking" });
+    const memory = text.split("## Memory\n")[1]!.split("\n\n")[0]!;
+    expect(memory).toContain("- mem0, project github.com/beetrain/archivist: 1 entries sent earlier; not in use now, so not synced");
+    expect(memory).not.toContain(refusal);
+    expect(text.split("## What to do\n")[1]).not.toContain("/archivist memory sync");
+  });
+
   it("shows the mod's note about memory even before anything was sent", async () => {
     const io = memoryIo();
     await appendLedger(io, [add(entry({ id: "gk-1", type: "gotcha", title: "Alpha", content: "A fact", created: day(1) }))]);
