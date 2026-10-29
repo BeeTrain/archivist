@@ -46,6 +46,7 @@ var withLocalIgnored = (io) => {
 // src/core/config.ts
 var DEFAULT_CONFIG = {
   enabled: true,
+  codex: { enabled: false, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   language: "auto",
   analyzer: {
     idleSeconds: 90,
@@ -1398,6 +1399,58 @@ var scanCommands = async (io, language = "auto") => {
 import { randomBytes, createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { basename } from "node:path";
+
+// src/analyzer/prompts.ts
+var CURATE_SYSTEM = [
+  "You curate a small knowledge base that an AI coding agent reads at the start of every session in one project.",
+  "Every line it reads costs tokens in every future session, and agents follow everything written, so be strict:",
+  "- Keep only facts the agent cannot derive quickly from the code: exact commands, non-obvious pitfalls, decisions with their reasons.",
+  "- Never write overviews, directory structure, generic best practices, or anything already in the existing project docs.",
+  "- Never record one-off operations the task already finished (creating a repo, setting up credentials, rewriting a commit): only what a future task will need again.",
+  '- Never record temporary state or to-dos ("revert X after the test", "not run yet", "until phase 4"): only facts that stay true.',
+  '- Never tie an entry to the task at hand: no ticket numbers (ABC-123), no branch names of the current work, no epic. State the rule that outlives the task without them ("each batch gets its own branch, merged locally", not "branch tech/ABC-123-\u2026"), or leave it out.',
+  "- Only knowledge of THIS project: never the user's machine or accounts (dotfiles, global git config, shell setup, credentials), never other repositories, never what tools already enforce without the agent (git config, hooks, linters, CI). The test: would an agent working in this project act differently because of it, and could it not learn it from the code, the docs or the tools?",
+  "- One atomic fact per entry: two facts are two entries, never one with a joint title.",
+  "- title: \u2264 8 words naming the fact. content: 1\u20132 lines, imperative, concrete (exact command, path, flag); it must not repeat the title.",
+  "- Prefer reinforcing or updating an existing entry over adding a near-duplicate.",
+  "- Deprecate an existing entry only when the notes clearly contradict it.",
+  "- A decision needs a rationale (why, and what was rejected). Its content starts with the rule itself in one sentence: that sentence is what every session reads.",
+  "- scope.paths: set it for any entry, a decision too, that only matters when working on part of the code; it then loads only there.",
+  "- confidence: 0.9+ only for facts directly confirmed in the task (a command that ran, a decision the user approved); 0.5\u20130.7 for plausible but unverified; below 0.5 do not propose.",
+  "- Most tasks teach nothing durable: then return no ops.",
+  '- procedure: only for a multi-step workflow that is likely to recur; content is its numbered steps (exact commands), rationale is one full sentence saying when to use it ("Use when cutting a release.").',
+  "- feedback: for existing entries the notes say were USED (helpful) or WRONG (harmful). Never guess: no mention, no feedback.",
+  "",
+  "Answer with ONE JSON object and nothing else:",
+  '{"summary": "<one line: what this task taught, or why nothing>",',
+  ' "ops": [',
+  '  {"op":"add","type":"command|gotcha|decision|procedure","title":"<\u22648 words>","content":"<1\u20132 lines; numbered steps for a procedure>","rationale":"<why for a decision; for a procedure, one sentence saying when to use it>",',
+  '   "scope":{"paths":["src/db/**"]},"evidence":[{"file":"<project-relative path>","anchor":"<script/symbol/heading>"}],',
+  '   "confidence":0.0,"supersedes":["<id>"],"savings":{"toolCalls":0,"tokens":0}},',
+  '  {"op":"update","id":"<id>","content":"<new content>","confidence":0.0},',
+  '  {"op":"reinforce","id":"<id>"},',
+  '  {"op":"deprecate","id":"<id>","reason":"<why>","confidence":0.0}',
+  " ],",
+  ' "feedback": [{"id":"<id>","verdict":"helpful|harmful"}]}',
+  "Omit optional fields you have nothing for. savings: your estimate of tool calls and tokens a future similar task saves.",
+  "Write titles and content in the language of the notes."
+].join("\n");
+
+// src/adapters/codex/queue.ts
+var BASE = ".archivist/.local/codex";
+var taskPath = (session) => `${BASE}/tasks/${session}.json`;
+var readTask = async (io, session) => {
+  const text = await io.read(taskPath(session));
+  return text ? JSON.parse(text) : void 0;
+};
+var analysisStatus = async (io) => {
+  const config = await loadConfig(io);
+  const names = (await io.list(`${BASE}/tasks`)).filter((n) => /^[a-f0-9]{32}\.json$/.test(n));
+  const tasks = await Promise.all(names.map((n) => readTask(io, n.slice(0, -5))));
+  return { enabled: config.codex.enabled, tasks: tasks.filter((t) => !!t).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10).map(({ state, message, updatedAt }) => ({ state, message, updatedAt })) };
+};
+
+// src/cli/panel.ts
 var panelSnapshot = async (io) => {
   const [state, proposals] = await Promise.all([loadState(io), listProposals(io)]);
   const entries = activeEntries(state.entries).map(({ id, type, title: title2, content }) => ({ id, type, title: title2, content }));
@@ -1406,6 +1459,7 @@ var panelSnapshot = async (io) => {
     entries,
     proposals: proposals.map((p) => ({ id: p.id, text: describeOp(p.op), reason: p.reason })),
     counts: { entries: entries.length, review: proposals.length },
+    analysis: await analysisStatus(io),
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 };
@@ -1459,6 +1513,7 @@ async function refresh() {
     document.querySelector('#review-count').textContent = snapshot.counts.review;
     status.textContent = '\u041E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u043E \u0432 ' + new Date(snapshot.updatedAt).toLocaleTimeString('ru-RU') + ' \xB7 \u043A\u0430\u0436\u0434\u044B\u0435 3 \u0441\u0435\u043A\u0443\u043D\u0434\u044B';
     status.className = '';
+    document.querySelector('#analysis').textContent = snapshot.analysis.enabled ? snapshot.analysis.tasks[0]?.message || '\u0424\u043E\u043D\u043E\u0432\u044B\u0439 \u0430\u043D\u0430\u043B\u0438\u0437 \u0432\u043A\u043B\u044E\u0447\u0451\u043D \xB7 \u043E\u0436\u0438\u0434\u0430\u043D\u0438\u0435 \u0437\u0430\u0434\u0430\u0447\u0438' : '\u0424\u043E\u043D\u043E\u0432\u044B\u0439 \u0430\u043D\u0430\u043B\u0438\u0437 \u0432\u044B\u043A\u043B\u044E\u0447\u0435\u043D';
     draw();
   } catch {
     status.textContent = '\u041D\u0435\u0442 \u0441\u0432\u044F\u0437\u0438 \u0441 Archivist. \u0414\u0430\u043D\u043D\u044B\u0435 \u043C\u043E\u0433\u043B\u0438 \u0443\u0441\u0442\u0430\u0440\u0435\u0442\u044C. \u041F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u043C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435\u2026';
@@ -1476,6 +1531,7 @@ var panelHtml = `<!doctype html>
 <header><h1>\u{1F4DA} Archivist</h1><span id="project"></span></header>
 <nav aria-label="\u0420\u0430\u0437\u0434\u0435\u043B\u044B"><button type="button" data-view="entries" aria-pressed="true">\u0417\u0430\u043F\u0438\u0441\u0435\u0439<strong id="entries-count">\u2014</strong></button><button type="button" data-view="proposals" aria-pressed="false">\u041D\u0430 \u0440\u0435\u0432\u044C\u044E<strong id="review-count">\u2014</strong></button></nav>
 <p id="status" role="status">\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043A \u043F\u0440\u043E\u0435\u043A\u0442\u0443\u2026</p>
+<p id="analysis" role="status"></p>
 <input id="search" type="search" aria-label="\u041F\u043E\u0438\u0441\u043A" placeholder="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0437\u0430\u043F\u0438\u0441\u044F\u043C \u0438 \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F\u043C">
 <p id="review-help" hidden>\u0427\u0442\u043E\u0431\u044B \u0440\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F, \u043F\u043E\u043F\u0440\u043E\u0441\u0438\u0442\u0435 \u0432 \u0447\u0430\u0442\u0435: \xAB\u0420\u0430\u0437\u0431\u0435\u0440\u0438 \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F Archivist \u043D\u0430 \u0440\u0435\u0432\u044C\u044E\xBB. ID \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F \u0443\u043A\u0430\u0437\u0430\u043D \u043D\u0430 \u043A\u0430\u0440\u0442\u043E\u0447\u043A\u0435.</p>
 <main id="list" aria-label="\u0417\u0430\u043F\u0438\u0441\u0438 Archivist"></main>

@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import type { Io } from "../core/io.js";
 import { activeEntries, loadState } from "../core/ledger.js";
 import { describeOp, listProposals } from "../core/review.js";
+import { analysisStatus } from "../adapters/codex/queue.js";
 
 export const panelSnapshot = async (io: Io) => {
   const [state, proposals] = await Promise.all([loadState(io), listProposals(io)]);
@@ -13,6 +14,7 @@ export const panelSnapshot = async (io: Io) => {
     entries,
     proposals: proposals.map((p) => ({ id: p.id, text: describeOp(p.op), reason: p.reason })),
     counts: { entries: entries.length, review: proposals.length },
+    analysis: await analysisStatus(io),
     updatedAt: new Date().toISOString(),
   };
 };
@@ -67,6 +69,7 @@ async function refresh() {
     document.querySelector('#review-count').textContent = snapshot.counts.review;
     status.textContent = 'Обновлено в ' + new Date(snapshot.updatedAt).toLocaleTimeString('ru-RU') + ' · каждые 3 секунды';
     status.className = '';
+    document.querySelector('#analysis').textContent = snapshot.analysis.enabled ? snapshot.analysis.tasks[0]?.message || 'Фоновый анализ включён · ожидание задачи' : 'Фоновый анализ выключен';
     draw();
   } catch {
     status.textContent = 'Нет связи с Archivist. Данные могли устареть. Повторяем подключение…';
@@ -85,6 +88,7 @@ export const panelHtml = `<!doctype html>
 <header><h1>📚 Archivist</h1><span id="project"></span></header>
 <nav aria-label="Разделы"><button type="button" data-view="entries" aria-pressed="true">Записей<strong id="entries-count">—</strong></button><button type="button" data-view="proposals" aria-pressed="false">На ревью<strong id="review-count">—</strong></button></nav>
 <p id="status" role="status">Подключение к проекту…</p>
+<p id="analysis" role="status"></p>
 <input id="search" type="search" aria-label="Поиск" placeholder="Поиск по записям и предложениям">
 <p id="review-help" hidden>Чтобы разобрать предложения, попросите в чате: «Разбери предложения Archivist на ревью». ID предложения указан на карточке.</p>
 <main id="list" aria-label="Записи Archivist"></main>

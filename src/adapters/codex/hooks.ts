@@ -7,6 +7,7 @@ import { renderAll, renderCore } from "../../core/render.js";
 import { isExcluded } from "../../core/privacy.js";
 import { nodeIo, findRoot } from "../../cli/node-io.js";
 import { withLock } from "../../core/lock.js";
+import { captureTask } from "./queue.js";
 
 export const EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "Interrupt", "SessionEnd"]);
 const hash = (s: string): string => createHash("sha256").update(s).digest("hex").slice(0, 32);
@@ -48,7 +49,7 @@ export const handleHook = async (input: Record<string, unknown>): Promise<Record
   if (!config.enabled) return {};
   const event = capture(input, config.privacy.excludePaths);
   if (!event) return {};
-  await io.write(".archivist/.local/codex/collector.json", JSON.stringify({ v: 1, contentCaptured: false }) + "\n");
+  await io.write(".archivist/.local/codex/collector.json", JSON.stringify({ v: 1, contentCaptured: config.codex.enabled }) + "\n");
   const dir = join(io.root, ".archivist/.local/codex/events", event.session);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const identity = event.call ? `${event.event}:${event.call}` : event.turn ? `${event.event}:${event.turn}` : `${event.event}:${event.at}`;
@@ -59,6 +60,7 @@ export const handleHook = async (input: Record<string, unknown>): Promise<Record
   if (file) {
     try { await file.writeFile(JSON.stringify(event) + "\n"); } finally { await file.close(); }
   }
+  if (config.codex.enabled && file) await captureTask(io, input, config);
   if (event.event === "SessionStart") {
     const text = await withLock(io, async () => {
       const state = await loadState(io);
@@ -86,5 +88,11 @@ export const collectionSummary = async (root: string): Promise<string> => {
       } catch {}
     }
   }
-  return JSON.stringify({ sessions: sessions.length, events: total, counts, modelCalls: 0, contentCaptured: false }, null, 2);
+  const io = nodeIo(root, "codex");
+  const config = await loadConfig(io);
+  const tasks = await io.list(".archivist/.local/codex/tasks");
+  const budgets = (await io.list(".archivist/.local/codex")).filter((n) => /^budget-.*\.json$/.test(n));
+  let modelCalls = 0;
+  for (const name of budgets) modelCalls += Number(JSON.parse((await io.read(`.archivist/.local/codex/${name}`)) ?? "{}").calls ?? 0);
+  return JSON.stringify({ sessions: sessions.length, events: total, counts, modelCallsUpperBound: modelCalls, contentCaptured: tasks.some((n) => n.endsWith(".json")), analysisEnabled: config.codex.enabled }, null, 2);
 };

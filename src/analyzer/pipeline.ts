@@ -3,7 +3,7 @@ import type { Config } from "../core/config.js";
 import { PATHS, joinPath, type Io, type Llm } from "../core/io.js";
 import { activeEntries, appendLedger, loadState, parseLedger } from "../core/ledger.js";
 import { withLock } from "../core/lock.js";
-import { redact } from "../core/privacy.js";
+import { redact, isExcluded } from "../core/privacy.js";
 import { groupAreas, renderAll } from "../core/render.js";
 import { appendAnalysis, appendMetrics, loadAnalyses, loadMetrics, toMetrics } from "../core/metrics.js";
 import { commandsUsed, loadUsage, recordUse, saveUsage } from "../core/usage.js";
@@ -51,9 +51,10 @@ const alreadyAnalysed = async (io: Io, segment: string): Promise<boolean> =>
   parseLedger((await io.read(PATHS.ledger)) ?? "").records.some((r) => r.src?.segment === segment) ||
   (await listProposals(io)).some((p) => p.src?.segment === segment);
 
-const readDocs = async (io: Io): Promise<string[]> => {
+const readDocs = async (io: Io, excluded: string[]): Promise<string[]> => {
   const out: string[] = [];
   for (const p of DOCS) {
+    if (isExcluded(p, excluded)) continue;
     const t = await io.read(p);
     if (t) out.push(t.slice(0, 50_000));
   }
@@ -69,6 +70,8 @@ export const analyzeSegment = async (args: {
   messages?: Message[];
   /** Tokens in the live context: above `forkMaxContextTokens` the reflection costs more than it is worth. */
   contextTokens?: number;
+  reviewOnly?: boolean;
+  shouldCommit?: () => Promise<boolean>;
   now: Date;
 }): Promise<AnalysisResult> => {
   const { io, llm, config, segment: seg, now } = args;
@@ -130,17 +133,20 @@ export const analyzeSegment = async (args: {
   if (!notes) notes = args.messages ? digestFromMessages(sliceTask(args.messages, seg.prompts[0])) : digestFromSegment(seg);
   // Whatever the task touched may hold secrets: they never reach the curator, so never an entry.
   notes = redact(notes).text;
+  if (args.reviewOnly && notes.length > 40000) notes = `${notes.slice(0, 16000)}\n…\n${notes.slice(-24000)}`;
 
   // 2. Curate: notes → ops against the relevant existing entries.
   const c = await llm.complete({ system: CURATE_SYSTEM, prompt: curatePrompt({ notes, notesKind, signals: signalsText(signals), candidates: inPlay, language: config.language }), maxTokens: 2500 });
   const curateUsage = toUsage(c.usage);
   usage = addUsage(usage, curateUsage);
   const reply = c.ok ? parseCuratorReply(c.text) : undefined;
+  if (args.reviewOnly && (!c.ok || !reply)) throw new Error(c.ok ? "Invalid curator reply" : c.reason);
   if (!c.ok) error = [error, `curate: ${c.reason}`].filter(Boolean).join("; ");
   else if (!reply) error = [error, "curate: reply was not JSON"].filter(Boolean).join("; ");
 
   // 3. Validate, apply, render.
   return withLock(io, async () => {
+    if (args.shouldCommit && !(await args.shouldCommit())) return { kind: "skipped", reason: "task changed", usage };
     const state = await loadState(io);
     const known = new Set(activeEntries(state.entries).map((e) => e.id));
     const src = { segment: seg.id };
@@ -149,13 +155,19 @@ export const analyzeSegment = async (args: {
       entries: state.entries,
       io,
       config,
-      docs: await readDocs(io),
+      docs: await readDocs(io, config.privacy.excludePaths),
       now: ts,
       src,
       skipped: await loadSkipped(io),
       procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => (JSON.parse(l) as { text: string }).text),
       pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op })),
     });
+    if (args.reviewOnly) {
+      v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? "Codex: review required" })));
+      v.records.length = 0;
+      v.applied.length = 0;
+      v.promoted.length = 0;
+    }
     // A repeat applied these: their proposals are settled.
     for (const p of (await listProposals(io)).filter((p) => v.promoted.includes(p.id))) await io.remove?.(p.path);
     await appendLedger(io, v.records);

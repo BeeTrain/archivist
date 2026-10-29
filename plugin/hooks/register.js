@@ -41,6 +41,7 @@ var withLocalIgnored = (io) => {
 // src/core/config.ts
 var DEFAULT_CONFIG = {
   enabled: true,
+  codex: { enabled: false, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   language: "auto",
   analyzer: {
     idleSeconds: 90,
@@ -1582,9 +1583,10 @@ var pickCandidates = (entries, seg2, edits, k2 = TOP_K) => {
   return out;
 };
 var alreadyAnalysed = async (io, segment2) => (await loadAnalyses(io)).some((a) => a.segment === segment2) || parseLedger(await io.read(PATHS.ledger) ?? "").records.some((r) => r.src?.segment === segment2) || (await listProposals(io)).some((p) => p.src?.segment === segment2);
-var readDocs = async (io) => {
+var readDocs = async (io, excluded) => {
   const out = [];
   for (const p of DOCS) {
+    if (isExcluded(p, excluded)) continue;
     const t = await io.read(p);
     if (t) out.push(t.slice(0, 5e4));
   }
@@ -1639,13 +1641,18 @@ var analyzeSegment = async (args) => {
   }
   if (!notes) notes = args.messages ? digestFromMessages(sliceTask(args.messages, seg2.prompts[0])) : digestFromSegment(seg2);
   notes = redact(notes).text;
+  if (args.reviewOnly && notes.length > 4e4) notes = `${notes.slice(0, 16e3)}
+\u2026
+${notes.slice(-24e3)}`;
   const c = await llm.complete({ system: CURATE_SYSTEM, prompt: curatePrompt({ notes, notesKind, signals: signalsText(signals), candidates: inPlay, language: config.language }), maxTokens: 2500 });
   const curateUsage = toUsage(c.usage);
   usage = addUsage(usage, curateUsage);
   const reply = c.ok ? parseCuratorReply(c.text) : void 0;
+  if (args.reviewOnly && (!c.ok || !reply)) throw new Error(c.ok ? "Invalid curator reply" : c.reason);
   if (!c.ok) error = [error, `curate: ${c.reason}`].filter(Boolean).join("; ");
   else if (!reply) error = [error, "curate: reply was not JSON"].filter(Boolean).join("; ");
   return withLock(io, async () => {
+    if (args.shouldCommit && !await args.shouldCommit()) return { kind: "skipped", reason: "task changed", usage };
     const state2 = await loadState(io);
     const known = new Set(activeEntries(state2.entries).map((e) => e.id));
     const src = { segment: seg2.id };
@@ -1654,13 +1661,19 @@ var analyzeSegment = async (args) => {
       entries: state2.entries,
       io,
       config,
-      docs: await readDocs(io),
+      docs: await readDocs(io, config.privacy.excludePaths),
       now: ts,
       src,
       skipped: await loadSkipped(io),
       procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => JSON.parse(l).text),
       pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op }))
     });
+    if (args.reviewOnly) {
+      v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? "Codex: review required" })));
+      v.records.length = 0;
+      v.applied.length = 0;
+      v.promoted.length = 0;
+    }
     for (const p of (await listProposals(io)).filter((p2) => v.promoted.includes(p2.id))) await io.remove?.(p.path);
     await appendLedger(io, v.records);
     if (v.firstSightings.length)
