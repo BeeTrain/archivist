@@ -1508,11 +1508,13 @@ var mem0CloudStore = (http, scope, project) => {
 var SERVER_LIST_LIMIT = 1e3;
 var mem0ServerStore = (http, scope, project, name) => {
   const add = async (text, signature) => addedId(await http("POST", "/memories", { messages: [{ role: "user", content: text }], infer: false, agent_id: scope.agentId, user_id: scope.userId, metadata: metadataOf(signature) }));
-  const list = async () => {
+  const listNow = async () => {
     const answer = answerOf(await http("GET", `/memories?agent_id=${encodeURIComponent(scope.agentId)}&top_k=${SERVER_LIST_LIMIT}`));
     const rows = Array.isArray(answer) ? answer : answer?.results ?? [];
     return { items: itemsOf(rows.filter((row) => row.metadata?.archivist_project === project)), cut: rows.length >= SERVER_LIST_LIMIT };
   };
+  let lastListing;
+  const list = () => lastListing = listNow();
   return {
     name,
     readsCostQuota: false,
@@ -1531,7 +1533,7 @@ var mem0ServerStore = (http, scope, project, name) => {
         const found = reply.status === 404 ? void 0 : answerOf(reply);
         if (found?.metadata?.archivist_key === `archivist/${project}/${id}` && typeof found.memory === "string") return { ref: found.id ?? ref, text: found.memory };
       }
-      return newestOf((await list()).items.filter((item) => item.id === id));
+      return newestOf((await (lastListing ?? list())).items.filter((item) => item.id === id));
     },
     list
   };

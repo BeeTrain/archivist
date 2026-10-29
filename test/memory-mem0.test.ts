@@ -256,6 +256,30 @@ describe("the store on an own mem0 server", () => {
     expect(await store(gone.http).fetch!("gk-1", "m-1")).toEqual({ ref: "m-2", text: "# gk-1 again\n" });
   });
 
+  it("lists once for every entry it cannot read by id", async () => {
+    const command = { ...metadata, archivist_key: `archivist/${project}/cmd-1`, archivist_id: "cmd-1" };
+    const { calls, http } = fakeHttp([
+      json(200, {
+        results: [
+          { id: "m-1", memory: "# gk-1\n", metadata },
+          { id: "m-2", memory: "# cmd-1\n", metadata: command },
+        ],
+      }),
+    ]);
+    const own = store(http);
+    expect((await own.fetch!("gk-1"))?.ref).toBe("m-1");
+    expect((await own.fetch!("cmd-1"))?.ref).toBe("m-2");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("asks the server afresh each time its listing is wanted", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [] }), json(200, { results: [] })]);
+    const own = store(http);
+    await own.list!();
+    await own.list!();
+    expect(calls).toHaveLength(2);
+  });
+
   it("counts deleting an item that is gone as done", async () => {
     const { calls, http } = fakeHttp([json(404, { detail: "Memory with id m-1 not found" })]);
     await expect(store(http).remove("m-1")).resolves.toBeUndefined();

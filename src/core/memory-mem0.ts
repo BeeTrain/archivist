@@ -176,11 +176,13 @@ const SERVER_LIST_LIMIT = 1000;
 export const mem0ServerStore = (http: HttpCall, scope: Mem0Scope, project: string, name: string): MemoryStore => {
   const add = async (text: string, signature: Signature): Promise<string> =>
     addedId(await http("POST", "/memories", { messages: [{ role: "user", content: text }], infer: false, agent_id: scope.agentId, user_id: scope.userId, metadata: metadataOf(signature) }));
-  const list = async (): Promise<MemoryListing> => {
+  const listNow = async (): Promise<MemoryListing> => {
     const answer = answerOf<Mem0Memory[] | { results?: Mem0Memory[] }>(await http("GET", `/memories?agent_id=${encodeURIComponent(scope.agentId)}&top_k=${SERVER_LIST_LIMIT}`));
     const rows = Array.isArray(answer) ? answer : (answer?.results ?? []);
     return { items: itemsOf(rows.filter((row) => row.metadata?.archivist_project === project)), cut: rows.length >= SERVER_LIST_LIMIT };
   };
+  let lastListing: Promise<MemoryListing> | undefined;
+  const list = (): Promise<MemoryListing> => (lastListing = listNow());
   return {
     name,
     readsCostQuota: false,
@@ -199,7 +201,7 @@ export const mem0ServerStore = (http: HttpCall, scope: Mem0Scope, project: strin
         const found = reply.status === 404 ? undefined : answerOf<Mem0Memory>(reply);
         if (found?.metadata?.archivist_key === `archivist/${project}/${id}` && typeof found.memory === "string") return { ref: found.id ?? ref, text: found.memory };
       }
-      return newestOf((await list()).items.filter((item) => item.id === id));
+      return newestOf((await (lastListing ?? list())).items.filter((item) => item.id === id));
     },
     list,
   };
