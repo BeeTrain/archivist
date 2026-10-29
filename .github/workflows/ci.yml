@@ -18,9 +18,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm run validate:codex
       # Installing from the marketplace clones the repo and builds nothing: the built plugin must be committed.
       - name: Built plugin is committed and current
-        run: git diff --exit-code -- plugin/
+        run: git diff --exit-code -- plugin/ plugin-codex/
       - name: Validate plugin and marketplace
         run: |
           npx -y @anthropic-ai/claude-code@2.1.306 plugin validate plugin --strict

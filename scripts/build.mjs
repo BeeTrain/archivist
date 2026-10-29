@@ -29,3 +29,15 @@ await build({
 chmodSync("plugin/bin/archivist", 0o755);
 
 console.log("built plugin/hooks/register.js, plugin/bin/archivist");
+
+await build({
+  entryPoints: ["src/adapters/codex/entry.ts"],
+  outfile: "plugin-codex/bin/archivist",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node20",
+  legalComments: "none",
+  banner: { js: "#!/usr/bin/env node" },
+});
+chmodSync("plugin-codex/bin/archivist", 0o755);

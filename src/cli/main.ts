@@ -17,6 +17,7 @@ import { loadMemoryCaches } from "../core/memory.js";
 import { BASELINE, compareText, summarize, toMetrics, type Baseline } from "../core/metrics.js";
 import { findRoot, nodeIo, uninstall } from "./node-io.js";
 import { scanCommands } from "./scan.js";
+import { startPanel } from "./panel.js";
 
 const HELP = `archivist — project knowledge from coding-agent sessions
 
@@ -24,6 +25,7 @@ Usage: archivist <command> [--root <dir>]
 
   init                  set up .archivist/ and seed exact build/test/lint commands from the project's manifests
   status                what is recorded: entries by type, proposals waiting for review
+  panel                 open a live local dashboard (prints its URL; keep the process running)
   report [file]         print the latest task report, or the given one
   review [--json]       list the proposals waiting for review (--json: with stable ids, for the triage skill)
   apply <n|id|1,3|all>  record proposals as they are
@@ -84,7 +86,7 @@ const init = async (io: Io): Promise<void> =>
     printOutcomes([...v.applied, ...v.rejected]);
     if (!v.applied.length) console.log("  no new commands found to record");
     printRender(await renderAll(io, (await loadState(io)).entries, config));
-    console.log("Commit .archivist/ and .claude/rules/archivist/ to share the knowledge with your team.");
+    console.log(`Commit .archivist/${io.target === "codex" ? " and .agents/skills/" : " and .claude/rules/archivist/"} to share the knowledge with your team.`);
   });
 
 const status = async (io: Io): Promise<void> => {
@@ -220,11 +222,11 @@ const doctor = async (io: Io): Promise<boolean> => {
   };
   const node = Number(process.versions.node.split(".")[0]);
   check(node >= 20, `Node ${process.versions.node}`, "Archivist's CLI needs Node 20 or newer");
-  const v = claudeVersion();
+  const v = io.target === "codex" ? undefined : claudeVersion();
   if (v) {
     const recent = v[0]! > MIN_CLAUDE[0]! || (v[0] === MIN_CLAUDE[0] && (v[1]! > MIN_CLAUDE[1]! || (v[1] === MIN_CLAUDE[1] && v[2]! >= MIN_CLAUDE[2]!)));
     check(recent, `Claude Code ${v.join(".")}`, `the Archivist mod needs Claude Code ${MIN_CLAUDE.join(".")} or newer`);
-  } else console.log("· claude not on PATH (fine inside the desktop app; the CLI checks are skipped)");
+  } else if (io.target !== "codex") console.log("· claude not on PATH (fine inside the desktop app; the CLI checks are skipped)");
   check(await io.exists(PATHS.dir), `${PATHS.dir}/ exists`, "run `archivist init`");
   const configText = await io.read(PATHS.config);
   let configOk = true;
@@ -239,11 +241,12 @@ const doctor = async (io: Io): Promise<boolean> => {
   const state = await loadState(io);
   check(!state.badLines.length, `ledger: ${state.entries.size} entries`, `unreadable lines: ${state.badLines.join(", ")}`);
   const config = await loadConfig(io);
-  for (const name of (await io.list(PATHS.rulesDir)).filter((n) => n.endsWith(".md"))) {
-    const path = `${PATHS.rulesDir}/${name}`;
+  const rulesDir = io.target === "codex" ? ".archivist/codex/rules" : PATHS.rulesDir;
+  for (const name of (await io.list(rulesDir)).filter((n) => n.endsWith(".md"))) {
+    const path = `${rulesDir}/${name}`;
     const text = (await io.read(path)) ?? "";
     const lines = text.split("\n").length - 1;
-    const core = path === PATHS.coreRule;
+    const core = name === "core.md";
     // A path-scoped file carries its frontmatter on top of the budget.
     const budget = core ? config.budgets.coreLines : config.budgets.pathFileLines + 6;
     const chars = core ? config.budgets.coreChars : config.budgets.pathFileChars + 400;
@@ -258,9 +261,17 @@ const main = async (): Promise<number> => {
   const args = process.argv.slice(2);
   const rootAt = args.indexOf("--root");
   const start = rootAt >= 0 ? args.splice(rootAt, 2)[1] : process.cwd();
+  const targetAt = args.indexOf("--target");
+  const target = targetAt >= 0 ? args.splice(targetAt, 2)[1] : process.env.ARCHIVIST_TARGET ?? "claude";
+  if (target !== "claude" && target !== "codex") throw new Error("--target must be claude or codex");
   const [cmd, ...rest] = args;
-  const io = nodeIo(findRoot(start ?? process.cwd()));
+  const io = nodeIo(findRoot(start ?? process.cwd()), target);
   switch (cmd) {
+    case "panel": {
+      const { url } = await startPanel(io);
+      console.log(url);
+      return 0;
+    }
     case "init":
       await init(io);
       return 0;
@@ -288,6 +299,7 @@ const main = async (): Promise<number> => {
       console.log(recallText((await loadState(io)).entries, rest.join(" ")));
       return 0;
     case "baseline":
+      if (io.target === "codex") throw new Error("Codex baseline is not available yet");
       await baseline(io, rest);
       return 0;
     case "stats":
@@ -309,13 +321,13 @@ const main = async (): Promise<number> => {
       return (await doctor(io)) ? 0 : 1;
     case "uninstall": {
       const inMemory = (await loadMemoryCaches(io)).filter((m) => Object.keys(m.items).length);
-      const removed = await uninstall(io.root, rest.includes("--purge"));
+      const removed = await uninstall(io.root, rest.includes("--purge"), io.target);
       for (const m of inMemory)
         console.log(`Entries also live in ${m.store} memory (project ${m.project}): run /archivist memory clear in a Claude Code session to remove them.`);
       for (const r of removed) console.log(`  removed ${r}`);
       if (!removed.length) console.log("Nothing generated by Archivist here.");
       if (!rest.includes("--purge")) console.log(`Kept ${PATHS.dir}/ (the ledger is the knowledge itself): add --purge to remove it too.`);
-      console.log("To remove the plugin from Claude Code: /plugin uninstall archivist@archivist");
+      console.log(io.target === "codex" ? "Disable or uninstall Archivist in Codex plugin settings." : "To remove the plugin from Claude Code: /plugin uninstall archivist@archivist");
       return 0;
     }
     case undefined:

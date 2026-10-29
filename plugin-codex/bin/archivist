@@ -1,0 +1,2127 @@
+#!/usr/bin/env node
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res, err) => function __init() {
+  if (err) throw err[0];
+  try {
+    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+  } catch (e) {
+    throw err = [e], e;
+  }
+};
+
+// src/core/io.ts
+var PATHS, joinPath, relPath, withLocalIgnored;
+var init_io = __esm({
+  "src/core/io.ts"() {
+    "use strict";
+    PATHS = {
+      dir: ".archivist",
+      config: ".archivist/config.json",
+      ledger: ".archivist/ledger.jsonl",
+      index: ".archivist/INDEX.md",
+      decisions: ".archivist/decisions",
+      // Reports quote the user's prompts and session ids; proposals are one person's queue: both stay local.
+      reports: ".archivist/.local/reports",
+      proposals: ".archivist/.local/proposals",
+      gitignore: ".archivist/.gitignore",
+      rulesDir: ".claude/rules/archivist",
+      skillsDir: ".claude/skills",
+      coreRule: ".claude/rules/archivist/core.md"
+    };
+    joinPath = (...parts) => parts.filter(Boolean).join("/").replace(/\/{2,}/g, "/");
+    relPath = (root, path) => {
+      const r = root.endsWith("/") ? root : `${root}/`;
+      return path.startsWith(r) ? path.slice(r.length) : path;
+    };
+    withLocalIgnored = (io) => {
+      let checked = false;
+      const guard = async () => {
+        if (checked) return;
+        checked = true;
+        const text = await io.read(PATHS.gitignore);
+        if (text === void 0) await io.write(PATHS.gitignore, ".local/\n");
+        else if (!text.split("\n").some((l) => /^\/?\.local\/?\s*$/.test(l.trim())))
+          await io.write(PATHS.gitignore, `${text}${text.endsWith("\n") || !text ? "" : "\n"}.local/
+`);
+      };
+      return {
+        ...io,
+        async write(path, text) {
+          if (path.startsWith(`${PATHS.dir}/`) && path !== PATHS.gitignore) await guard();
+          await io.write(path, text);
+        }
+      };
+    };
+  }
+});
+
+// src/core/config.ts
+var DEFAULT_CONFIG, merge, loadConfig;
+var init_config = __esm({
+  "src/core/config.ts"() {
+    "use strict";
+    init_io();
+    DEFAULT_CONFIG = {
+      enabled: true,
+      language: "auto",
+      analyzer: {
+        idleSeconds: 90,
+        minToolCalls: 5,
+        reflect: "fork",
+        forkMaxContextTokens: 3e5,
+        curateModel: "haiku",
+        maxTokensPerDay: 3e6,
+        maxRateLimitPercent: 90,
+        useCredits: false
+      },
+      apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
+      budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
+      rules: { decisions: "compact", files: true },
+      memory: { enabled: true, server: "auto", project: "auto" },
+      privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
+      report: { mode: "quiet", toastMs: 15e3 },
+      review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 }
+    };
+    merge = (base, over) => {
+      if (!over) return base;
+      const out = { ...base };
+      for (const [k, v] of Object.entries(over)) {
+        const b = base[k];
+        out[k] = v && typeof v === "object" && !Array.isArray(v) && b && typeof b === "object" ? merge(b, v) : v;
+      }
+      return out;
+    };
+    loadConfig = async (io) => {
+      const raw = await io.read(PATHS.config);
+      if (!raw) return DEFAULT_CONFIG;
+      try {
+        return merge(DEFAULT_CONFIG, JSON.parse(raw));
+      } catch {
+        return DEFAULT_CONFIG;
+      }
+    };
+  }
+});
+
+// src/core/ledger.ts
+var parseLedger, foldLedger, loadState, appendLedger, PREFIX, newId, nextAdr, activeEntries;
+var init_ledger = __esm({
+  "src/core/ledger.ts"() {
+    "use strict";
+    init_io();
+    parseLedger = (text) => {
+      const records = [];
+      const badLines = [];
+      text.split("\n").forEach((line, i) => {
+        if (!line.trim()) return;
+        try {
+          const r = JSON.parse(line);
+          if (r && r.v === 1 && typeof r.op === "string") records.push(r);
+          else badLines.push(i + 1);
+        } catch {
+          badLines.push(i + 1);
+        }
+      });
+      return { records, badLines };
+    };
+    foldLedger = (records) => {
+      const entries = /* @__PURE__ */ new Map();
+      for (const r of records) {
+        if (r.op === "add") {
+          entries.set(r.entry.id, { ...r.entry });
+          for (const old of r.entry.supersedes ?? []) {
+            const e2 = entries.get(old);
+            if (e2 && e2.status === "active") entries.set(old, { ...e2, status: "deprecated", deprecatedReason: `superseded by ${r.entry.id}`, updated: r.ts });
+          }
+          continue;
+        }
+        const e = entries.get(r.id);
+        if (!e) continue;
+        if (r.op === "update") entries.set(r.id, { ...e, ...r.patch, updated: r.ts });
+        else if (r.op === "deprecate") entries.set(r.id, { ...e, status: "deprecated", deprecatedReason: r.reason, updated: r.ts });
+        else if (r.op === "reinforce") entries.set(r.id, { ...e, reinforced: e.reinforced + 1 });
+      }
+      return entries;
+    };
+    loadState = async (io) => {
+      const text = await io.read(PATHS.ledger) ?? "";
+      const { records, badLines } = parseLedger(text);
+      return { entries: foldLedger(records), badLines };
+    };
+    appendLedger = async (io, records) => {
+      if (!records.length) return;
+      const prev = await io.read(PATHS.ledger) ?? "";
+      const sep = prev && !prev.endsWith("\n") ? "\n" : "";
+      await io.write(PATHS.ledger, prev + sep + records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    };
+    PREFIX = { command: "cmd", gotcha: "gk", decision: "dec", procedure: "proc" };
+    newId = (type, taken) => {
+      for (; ; ) {
+        const id = `${PREFIX[type]}-${Math.random().toString(36).slice(2, 6)}`;
+        if (!taken.has(id)) return id;
+      }
+    };
+    nextAdr = (entries) => {
+      let max = 0;
+      for (const e of entries) if (e.adr && e.adr > max) max = e.adr;
+      return max + 1;
+    };
+    activeEntries = (entries) => [...entries.values()].filter((e) => e.status === "active");
+  }
+});
+
+// src/core/text.ts
+var normalize, tokens, jaccard, slug, truncate, searchTokens, stemSet, stemSimilarity, coverage, NOT_TICKETS, ticketRef, firstCode, bm25, globToRegExp;
+var init_text = __esm({
+  "src/core/text.ts"() {
+    "use strict";
+    normalize = (s) => s.toLowerCase().replace(/[`*_~"'«»“”()[\]{}<>]/g, " ").replace(/[^\p{L}\p{N}./:@+-]+/gu, " ").trim();
+    tokens = (s) => normalize(s).split(/\s+/).filter((t) => t.length > 1);
+    jaccard = (a, b) => {
+      const A = new Set(tokens(a));
+      const B = new Set(tokens(b));
+      if (!A.size || !B.size) return 0;
+      let inter = 0;
+      for (const t of A) if (B.has(t)) inter++;
+      return inter / (A.size + B.size - inter);
+    };
+    slug = (s, max = 48) => normalize(s).replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "") || "entry";
+    truncate = (s, max) => s.length <= max ? s : `${s.slice(0, max - 1)}\u2026`;
+    searchTokens = (s) => tokens(s).flatMap((t) => t.split(/[-./:@+]+/)).filter((t) => t.length > 1).map((t) => t.slice(0, 5));
+    stemSet = (s) => new Set(searchTokens(s));
+    stemSimilarity = (a, b) => {
+      const A = stemSet(a);
+      const B = stemSet(b);
+      let inter = 0;
+      for (const t of A) if (B.has(t)) inter++;
+      return { jaccard: inter / (A.size + B.size - inter || 1), overlap: inter / (Math.min(A.size, B.size) || 1) };
+    };
+    coverage = (text, source) => {
+      const A = stemSet(text);
+      const B = stemSet(source);
+      let inter = 0;
+      for (const t of A) if (B.has(t)) inter++;
+      return inter / (A.size || 1);
+    };
+    NOT_TICKETS = /^(UTF|UCS|ISO|SHA|MD|RFC|HTTP|TLS|SSL|IPV|IEEE|ECMA|ES|X|BASE|AES|RSA|CRC|PEP|JSR|KB|MB|GB)$/;
+    ticketRef = (s) => {
+      for (const m of s.matchAll(/(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,14})-(\d{2,})(?!\d)/g)) if (!NOT_TICKETS.test(m[1])) return `${m[1]}-${m[2]}`;
+      return void 0;
+    };
+    firstCode = (s) => s.match(/`([^`]+)`/)?.[1]?.replace(/\s+/g, " ").trim();
+    bm25 = (docs, query, k1 = 1.2, b = 0.75) => {
+      const docTokens = docs.map(searchTokens);
+      const avg = docTokens.reduce((s, d) => s + d.length, 0) / Math.max(docTokens.length, 1);
+      const df = /* @__PURE__ */ new Map();
+      for (const d of docTokens) for (const t of new Set(d)) df.set(t, (df.get(t) ?? 0) + 1);
+      const q = [...new Set(searchTokens(query))];
+      return docTokens.map((d, index) => {
+        const tf = /* @__PURE__ */ new Map();
+        for (const t of d) tf.set(t, (tf.get(t) ?? 0) + 1);
+        let score2 = 0;
+        for (const t of q) {
+          const f = tf.get(t);
+          if (!f) continue;
+          const idf = Math.log(1 + (docs.length - (df.get(t) ?? 0) + 0.5) / ((df.get(t) ?? 0) + 0.5));
+          score2 += idf * f * (k1 + 1) / (f + k1 * (1 - b + b * d.length / (avg || 1)));
+        }
+        return { index, score: score2 };
+      }).filter((x) => x.score > 0).sort((x, y) => y.score - x.score);
+    };
+    globToRegExp = (glob) => {
+      let re = "";
+      for (let i = 0; i < glob.length; i++) {
+        const c = glob[i];
+        if (c === "*") {
+          if (glob[i + 1] === "*") {
+            re += ".*";
+            i++;
+            if (glob[i + 1] === "/") i++;
+          } else re += "[^/]*";
+        } else if (c === "?") re += "[^/]";
+        else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      }
+      return new RegExp(`^${re}$`);
+    };
+  }
+});
+
+// src/core/usage.ts
+var USAGE, loadUsage, unusedFor;
+var init_usage = __esm({
+  "src/core/usage.ts"() {
+    "use strict";
+    USAGE = ".archivist/.local/usage.json";
+    loadUsage = async (io) => {
+      try {
+        return JSON.parse(await io.read(USAGE) ?? "{}");
+      } catch {
+        return {};
+      }
+    };
+    unusedFor = (entries, u, days, now2) => entries.filter((e) => {
+      const last = [u[e.id]?.lastUsed, e.updated, e.created].filter(Boolean).sort().at(-1);
+      return now2.getTime() - new Date(last).getTime() > days * 864e5;
+    });
+  }
+});
+
+// src/core/render.ts
+var GENERATED, scopeLabel, adrNo, adrPath, byAge, oneLine, firstSentence, lineOf, HEADINGS, DECISIONS_NOTE, TYPE_RANK, merit, fill, live, ruleEntries, isScoped, renderCore, groupAreas, renderAreas, renderIndex, renderAdr, skillPath, renderSkill, renderViews, findStale, writeViews, pruneViews, renderAll;
+var init_render = __esm({
+  "src/core/render.ts"() {
+    "use strict";
+    init_io();
+    init_text();
+    init_usage();
+    GENERATED = "<!-- Generated by Archivist from .archivist/ledger.jsonl. Do not edit: changes are overwritten. -->";
+    scopeLabel = (e) => e.scope?.paths.length ? ` (${e.scope.paths.join(", ")})` : "";
+    adrNo = (e) => `ADR-${String(e.adr ?? 0).padStart(4, "0")}`;
+    adrPath = (e) => joinPath(PATHS.decisions, `${adrNo(e)}-${slug(e.title)}.md`);
+    byAge = (a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id);
+    oneLine = (s) => s.replace(/\s*\n\s*/g, " ").trim();
+    firstSentence = (s) => {
+      const t = oneLine(s);
+      const f = t.match(/^(.+?[.!?])(?:\s|$)/)?.[1] ?? t;
+      return f.length > 120 ? `${f.slice(0, 119).trimEnd()}\u2026` : f;
+    };
+    lineOf = (e, style) => e.type === "decision" ? `- ${adrNo(e)} **${e.title}**: ${style === "compact" ? firstSentence(e.content) : oneLine(e.content)}` : `- **${e.title}**: ${oneLine(e.content)}`;
+    HEADINGS = [
+      ["command", "## Commands"],
+      ["gotcha", "## Gotchas"],
+      ["decision", "## Decisions"]
+    ];
+    DECISIONS_NOTE = `Each in full, with its reasons: \`${PATHS.decisions}/ADR-NNNN-*.md\`.`;
+    TYPE_RANK = { command: 0, gotcha: 1, decision: 2, procedure: 3 };
+    merit = (e, usage) => {
+      const u = usage[e.id];
+      if (!u) return 0;
+      if (u.harmful > u.helpful) return -1 - u.harmful;
+      return u.used + u.seen + 2 * u.helpful;
+    };
+    fill = (head2, entries, budget, style, usage) => {
+      const ranked = [...entries].sort((a, b) => merit(b, usage) - merit(a, usage) || TYPE_RANK[a.type] - TYPE_RANK[b.type] || byAge(a, b));
+      const kept = /* @__PURE__ */ new Set();
+      const opened = /* @__PURE__ */ new Set();
+      let lines = head2.length + 2;
+      let chars = head2.join("\n").length + 80;
+      for (const e of ranked) {
+        const line = lineOf(e, style);
+        const first = !opened.has(e.type);
+        const heading = first ? HEADINGS.find(([t]) => t === e.type)?.[1] ?? "" : "";
+        const note = first && e.type === "decision" ? DECISIONS_NOTE : "";
+        const addLines = 1 + (first ? 2 : 0) + (note ? 1 : 0);
+        const addChars = line.length + 1 + (first ? heading.length + 2 : 0) + (note ? note.length + 1 : 0);
+        if (lines + addLines > budget.lines || chars + addChars > budget.chars) continue;
+        kept.add(e.id);
+        opened.add(e.type);
+        lines += addLines;
+        chars += addChars;
+      }
+      const out = [...head2];
+      for (const [type, heading] of HEADINGS) {
+        const items = entries.filter((e) => e.type === type && kept.has(e.id)).sort(byAge);
+        if (!items.length) continue;
+        out.push("", heading, ...type === "decision" ? [DECISIONS_NOTE] : [], ...items.map((e) => lineOf(e, style)));
+      }
+      const omitted = entries.length - kept.size;
+      if (omitted) out.push("", `${omitted} more in \`${PATHS.index}\` (run \`archivist recall <query>\`).`);
+      return { lines: out, omitted };
+    };
+    live = (entries, stale) => entries.filter((e) => e.status === "active" && !stale.has(e.id)).sort(byAge);
+    ruleEntries = (entries, stale) => live(entries, stale).filter((e) => e.type !== "procedure");
+    isScoped = (e) => Boolean(e.scope?.paths.length);
+    renderCore = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}) => {
+      const head2 = [
+        GENERATED,
+        "# Project knowledge (Archivist)",
+        "",
+        "Facts learned in earlier sessions. Prefer them over re-discovering; if one is wrong, say so. Before exploring, try `archivist recall <words>`."
+      ];
+      const core = ruleEntries(entries, stale).filter((e) => !isScoped(e));
+      return fill(head2, core, { lines: config.budgets.coreLines, chars: config.budgets.coreChars }, config.rules.decisions, usage).lines.join("\n") + "\n";
+    };
+    groupAreas = (entries, stale = /* @__PURE__ */ new Set()) => {
+      const groups = /* @__PURE__ */ new Map();
+      for (const e of ruleEntries(entries, stale).filter(isScoped)) {
+        const key = [...e.scope.paths].sort().join("\n");
+        groups.set(key, [...groups.get(key) ?? [], e]);
+      }
+      const areas = /* @__PURE__ */ new Map();
+      for (const [key, items] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+        const paths = key.split("\n");
+        const base = slug(paths[0].replace(/[*?{].*$/, "").replace(/\/+$/, "") || "area");
+        let name = joinPath(PATHS.rulesDir, `${base}.md`);
+        for (let i = 2; areas.has(name) || name === PATHS.coreRule; i++) name = joinPath(PATHS.rulesDir, `${base}-${i}.md`);
+        areas.set(name, { paths, items });
+      }
+      return areas;
+    };
+    renderAreas = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}) => {
+      const files = /* @__PURE__ */ new Map();
+      for (const [name, { paths, items }] of groupAreas(entries, stale)) {
+        const head2 = ["---", "paths:", ...paths.map((p) => `  - ${JSON.stringify(p)}`), "---", GENERATED, `# Project knowledge for ${paths.join(", ")} (Archivist)`];
+        files.set(name, fill(head2, items, { lines: config.budgets.pathFileLines, chars: config.budgets.pathFileChars }, "full", usage).lines.join("\n") + "\n");
+      }
+      return files;
+    };
+    renderIndex = (entries, stale = /* @__PURE__ */ new Set()) => {
+      const active = entries.filter((e) => e.status === "active").sort(byAge);
+      const lines = [GENERATED, "# Archivist index", "", "One line per active entry: `id` type (scope): title.", ""];
+      for (const e of active) lines.push(`- \`${e.id}\` ${e.type}${scopeLabel(e)}: ${e.title}${stale.has(e.id) ? " \u26A0 stale: its evidence is gone" : ""}`);
+      const gone = entries.filter((e) => e.status !== "active").length;
+      if (gone) lines.push("", `${gone} deprecated entries are kept in the ledger.`);
+      return lines.join("\n") + "\n";
+    };
+    renderAdr = (e) => {
+      const status2 = e.status === "active" ? "Accepted" : `Superseded${e.deprecatedReason ? ` (${e.deprecatedReason})` : ""}`;
+      const evidence = e.evidence.filter((v) => v.file).map((v) => `- \`${v.file}\`${v.anchor ? ` (${v.anchor})` : ""}`);
+      return [
+        GENERATED,
+        `# ADR-${String(e.adr ?? 0).padStart(4, "0")}: ${e.title}`,
+        "",
+        `- Status: ${status2}`,
+        `- Date: ${e.created.slice(0, 10)}`,
+        `- Entry: \`${e.id}\``,
+        "",
+        "## Context",
+        "",
+        e.rationale ?? "_Not recorded._",
+        "",
+        "## Decision",
+        "",
+        e.content,
+        ...evidence.length ? ["", "## Evidence", "", ...evidence] : [],
+        ""
+      ].join("\n");
+    };
+    skillPath = (e) => {
+      const ascii = slug(e.title, 40).replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/-{2,}/g, "-");
+      return joinPath(PATHS.skillsDir, `archivist-${ascii.length >= 3 ? ascii : e.id}`, "SKILL.md");
+    };
+    renderSkill = (e) => {
+      const name = skillPath(e).split("/").at(-2);
+      const description = oneLine(`${e.title.replace(/[.\s]+$/, "")}.${e.rationale ? ` ${e.rationale}` : ""}`);
+      return ["---", `name: ${name}`, `description: ${JSON.stringify(description)}`, "---", GENERATED, `# ${e.title}`, "", e.content.trim(), ""].join("\n");
+    };
+    renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}, target2 = "claude") => {
+      const all = [...entries.values()];
+      const views = /* @__PURE__ */ new Map();
+      if (config.rules.files) {
+        views.set(PATHS.coreRule, renderCore(all, config, stale, usage));
+        for (const [path, text] of renderAreas(all, config, stale, usage)) views.set(path, text);
+        for (const e of live(all, stale)) if (e.type === "procedure") views.set(skillPath(e), renderSkill(e));
+      }
+      views.set(PATHS.index, renderIndex(all, stale));
+      for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
+      if (target2 === "codex") {
+        const mapped = /* @__PURE__ */ new Map();
+        for (const [path, text] of views) {
+          const dest = path.replace(PATHS.rulesDir, ".archivist/codex/rules").replace(PATHS.skillsDir, ".agents/skills");
+          mapped.set(dest, text);
+        }
+        return mapped;
+      }
+      return views;
+    };
+    findStale = async (io, entries) => {
+      const stale = /* @__PURE__ */ new Set();
+      for (const e of entries.values()) {
+        if (e.status !== "active") continue;
+        const files = e.evidence.map((v) => v.file).filter((f) => Boolean(f));
+        if (!files.length) continue;
+        let any = false;
+        for (const f of files) if (await io.exists(f)) any = true;
+        if (!any) stale.add(e.id);
+      }
+      return stale;
+    };
+    writeViews = async (io, views) => {
+      const written = [];
+      for (const [path, text] of views) {
+        if (await io.read(path) === text) continue;
+        await io.write(path, text);
+        written.push(path);
+      }
+      return written;
+    };
+    pruneViews = async (io, views) => {
+      if (!io.remove) return [];
+      const files = [];
+      for (const dir of [io.target === "codex" ? ".archivist/codex/rules" : PATHS.rulesDir, PATHS.decisions])
+        for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
+      const skillsDir = io.target === "codex" ? ".agents/skills" : PATHS.skillsDir;
+      const skillDirs = (await io.list(skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(skillsDir, d));
+      for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
+      const removed = [];
+      for (const path of files) {
+        if (views.has(path) || !await io.exists(path)) continue;
+        if (!(await io.read(path) ?? "").slice(0, 600).includes(GENERATED)) continue;
+        await io.remove(path);
+        removed.push(path);
+      }
+      for (const dir of skillDirs) {
+        if (views.has(joinPath(dir, "SKILL.md")) || await io.exists(joinPath(dir, "SKILL.md"))) continue;
+        if (!io.removeEmptyDir || (await io.list(dir)).length) continue;
+        await io.removeEmptyDir(dir);
+        removed.push(`${dir}/`);
+      }
+      return removed;
+    };
+    renderAll = async (io, entries, config) => {
+      const stale = await findStale(io, entries);
+      const views = renderViews(entries, config, stale, await loadUsage(io), io.target);
+      return { written: await writeViews(io, views), removed: await pruneViews(io, views), stale };
+    };
+  }
+});
+
+// src/core/privacy.ts
+var MASK, SECRETS, ASSIGNMENT, redact, isExcluded;
+var init_privacy = __esm({
+  "src/core/privacy.ts"() {
+    "use strict";
+    init_text();
+    MASK = "[redacted]";
+    SECRETS = [
+      /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+      /\bsk-ant-[A-Za-z0-9_-]{16,}/g,
+      /\bsk-[A-Za-z0-9_-]{20,}/g,
+      /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
+      /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+      /\bAKIA[0-9A-Z]{16}\b/g,
+      /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+      /\bAIza[0-9A-Za-z_-]{35}\b/g,
+      /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+      /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi
+    ];
+    ASSIGNMENT = /\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)[A-Za-z0-9_]*)(\s*[:=]\s*)(["']?)([^\s"'`]{6,})\3/gi;
+    redact = (text) => {
+      let count = 0;
+      let out = text.replace(ASSIGNMENT, (_m, name, sep, q, value) => {
+        if (/^(\$\{?|process\.env|string|number|boolean|undefined|null|<)/.test(value)) return `${name}${sep}${q}${value}${q}`;
+        count++;
+        return `${name}${sep}${q}${MASK}${q}`;
+      });
+      for (const re of SECRETS) {
+        out = out.replace(re, (m) => {
+          count++;
+          return /^[a-z][a-z0-9+.-]*:\/\//i.test(m) ? `${m.split("://")[0]}://${MASK}@` : MASK;
+        });
+      }
+      return { text: out, count };
+    };
+    isExcluded = (path, globs) => globs.some((g) => globToRegExp(g).test(path));
+  }
+});
+
+// src/cli/node-io.ts
+import { existsSync } from "node:fs";
+import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+var nodeIo, rawNodeIo, findRoot, GENERATED_MARK, uninstall;
+var init_node_io = __esm({
+  "src/cli/node-io.ts"() {
+    "use strict";
+    init_io();
+    nodeIo = (root, target2 = "claude") => withLocalIgnored({ ...rawNodeIo(root), target: target2 });
+    rawNodeIo = (root) => ({
+      root,
+      async read(p) {
+        try {
+          return await readFile(join(root, p), "utf8");
+        } catch {
+          return void 0;
+        }
+      },
+      async write(p, text) {
+        await mkdir(dirname(join(root, p)), { recursive: true });
+        await writeFile(join(root, p), text);
+      },
+      async exists(p) {
+        return existsSync(join(root, p));
+      },
+      async list(dir) {
+        try {
+          return await readdir(join(root, dir));
+        } catch {
+          return [];
+        }
+      },
+      async remove(p) {
+        await rm(join(root, p), { force: true });
+      },
+      async removeEmptyDir(p) {
+        await rmdir(join(root, p)).catch(() => void 0);
+      },
+      mutex: {
+        async claim(p) {
+          await mkdir(dirname(join(root, p)), { recursive: true });
+          try {
+            await mkdir(join(root, p));
+            return true;
+          } catch (err) {
+            if (err.code === "EEXIST") return false;
+            throw err;
+          }
+        },
+        async age(p) {
+          try {
+            return Date.now() - (await stat(join(root, p))).mtimeMs;
+          } catch {
+            return void 0;
+          }
+        },
+        async release(p) {
+          await rmdir(join(root, p)).catch(() => void 0);
+        },
+        sleep: (ms) => new Promise((resolve2) => setTimeout(resolve2, ms))
+      }
+    });
+    findRoot = (start) => {
+      let dir = resolve(start);
+      for (; ; ) {
+        if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".archivist"))) return dir;
+        const up = dirname(dir);
+        if (up === dir) return resolve(start);
+        dir = up;
+      }
+    };
+    GENERATED_MARK = "Generated by Archivist";
+    uninstall = async (root, purge, target2 = "claude") => {
+      const removed = [];
+      const rulesDir = target2 === "codex" ? ".archivist/codex/rules" : PATHS.rulesDir;
+      const skillsDir = target2 === "codex" ? ".agents/skills" : PATHS.skillsDir;
+      const dropIfGenerated = async (rel) => {
+        const text = await readFile(join(root, rel), "utf8").catch(() => void 0);
+        if (text === void 0 || !text.slice(0, 600).includes(GENERATED_MARK)) return;
+        await rm(join(root, rel), { force: true });
+        removed.push(rel);
+      };
+      const names = async (rel) => readdir(join(root, rel)).catch(() => []);
+      for (const n of await names(rulesDir)) if (n.endsWith(".md")) await dropIfGenerated(`${rulesDir}/${n}`);
+      for (const d of await names(skillsDir)) {
+        if (!d.startsWith("archivist-")) continue;
+        await dropIfGenerated(`${skillsDir}/${d}/SKILL.md`);
+        await rmdir(join(root, skillsDir, d)).catch(() => void 0);
+      }
+      await rmdir(join(root, rulesDir)).catch(() => void 0);
+      if (purge && existsSync(join(root, PATHS.dir))) {
+        await rm(join(root, PATHS.dir), { recursive: true, force: true });
+        removed.push(`${PATHS.dir}/`);
+      }
+      return removed;
+    };
+  }
+});
+
+// src/core/lock.ts
+var LOCK, STALE_MS, WAIT_MS, POLL_MS, withLock;
+var init_lock = __esm({
+  "src/core/lock.ts"() {
+    "use strict";
+    LOCK = ".archivist/.local/lock";
+    STALE_MS = 2 * 6e4;
+    WAIT_MS = 3e4;
+    POLL_MS = 100;
+    withLock = async (io, fn, waitMs = WAIT_MS) => {
+      const m = io.mutex;
+      if (!m) return fn();
+      for (let waited = 0; !await m.claim(LOCK); waited += POLL_MS) {
+        const age = await m.age(LOCK);
+        if (age !== void 0 && age > STALE_MS) await m.release(LOCK);
+        else if (waited >= waitMs)
+          throw new Error(`${LOCK} is held by another Archivist writer${age === void 0 ? "" : ` (for ${Math.round(age / 1e3)} s)`}; if none is running, remove that directory`);
+        await m.sleep(POLL_MS);
+      }
+      try {
+        return await fn();
+      } finally {
+        await m.release(LOCK);
+      }
+    };
+  }
+});
+
+// src/core/args.ts
+var parseOptions, commaList;
+var init_args = __esm({
+  "src/core/args.ts"() {
+    "use strict";
+    parseOptions = (tokens2) => {
+      const words = [];
+      const opts = {};
+      for (let i = 0; i < tokens2.length; i++) {
+        const t = tokens2[i];
+        if (!t.startsWith("--")) words.push(t);
+        else if (i + 1 < tokens2.length && !tokens2[i + 1].startsWith("--")) opts[t.slice(2)] = tokens2[++i];
+        else opts[t.slice(2)] = "true";
+      }
+      return { words, opts };
+    };
+    commaList = (s) => s ? s.split(",").map((x) => x.trim()).filter(Boolean) : [];
+  }
+});
+
+// src/core/types.ts
+var ENTRY_TYPES, emptyUsage, addUsage, weightedTokens;
+var init_types = __esm({
+  "src/core/types.ts"() {
+    "use strict";
+    ENTRY_TYPES = ["command", "gotcha", "decision", "procedure"];
+    emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    addUsage = (a, b) => ({
+      input: a.input + (b.input ?? 0),
+      output: a.output + (b.output ?? 0),
+      cacheRead: a.cacheRead + (b.cacheRead ?? 0),
+      cacheWrite: a.cacheWrite + (b.cacheWrite ?? 0)
+    });
+    weightedTokens = (u) => u.input + u.output + u.cacheWrite + Math.round(u.cacheRead * 0.1);
+  }
+});
+
+// src/core/metrics.ts
+var METRICS, BASELINE, ANALYSES, loadAnalyses, toMetrics, loadMetrics, MEASURES, median, summarize, loadBaseline, fmt, compareText;
+var init_metrics = __esm({
+  "src/core/metrics.ts"() {
+    "use strict";
+    init_types();
+    METRICS = ".archivist/.local/metrics.jsonl";
+    BASELINE = ".archivist/.local/baseline.json";
+    ANALYSES = ".archivist/.local/analyses.jsonl";
+    loadAnalyses = async (io) => (await io.read(ANALYSES) ?? "").split("\n").flatMap((l) => {
+      try {
+        return l ? [JSON.parse(l)] : [];
+      } catch {
+        return [];
+      }
+    });
+    toMetrics = (s, ts, source) => ({
+      ts,
+      source,
+      turns: s.turns,
+      durationMs: s.durationMs,
+      tokens: weightedTokens(s.usage),
+      usage: s.usage,
+      toolCalls: s.toolCalls,
+      edits: s.edits.length,
+      readsBeforeFirstEdit: s.readsBeforeFirstEdit,
+      repeatedReads: s.repeatedReads.length,
+      failedCommands: s.failedCommands.length,
+      corrections: s.corrections.length,
+      rulesLoaded: s.rulesLoaded.length
+    });
+    loadMetrics = async (io) => (await io.read(METRICS) ?? "").split("\n").flatMap((l) => {
+      try {
+        return l ? [JSON.parse(l)] : [];
+      } catch {
+        return [];
+      }
+    });
+    MEASURES = [
+      ["tokens", "weighted tokens"],
+      ["toolCalls", "tool calls"],
+      ["readsBeforeFirstEdit", "reads before first edit"],
+      ["repeatedReads", "files re-read"],
+      ["failedCommands", "failed commands"],
+      ["durationMs", "duration, s"]
+    ];
+    median = (xs) => {
+      if (!xs.length) return 0;
+      const s = [...xs].sort((a, b) => a - b);
+      const m = Math.floor(s.length / 2);
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    summarize = (ms) => {
+      const real = ms.filter((m) => m.toolCalls > 0);
+      const medians = Object.fromEntries(MEASURES.map(([k]) => [k, median(real.map((m) => m[k]))]));
+      return { tasks: real.length, medians };
+    };
+    loadBaseline = async (io) => {
+      try {
+        return JSON.parse(await io.read(BASELINE) ?? "");
+      } catch {
+        return void 0;
+      }
+    };
+    fmt = (k, v) => k === "durationMs" ? String(Math.round(v / 1e3)) : k === "tokens" ? v >= 1e3 ? `${Math.round(v / 1e3)}k` : String(Math.round(v)) : String(Math.round(v * 10) / 10);
+    compareText = (baseline2, recent) => {
+      const lines = [];
+      if (!baseline2) {
+        lines.push("No baseline yet: run `archivist baseline` to measure the sessions before Archivist.", "");
+      }
+      lines.push(baseline2 ? `| measure (median per task) | before (${baseline2.summary.tasks} tasks) | now (${recent.tasks} tasks) | change |` : `| measure (median per task) | now (${recent.tasks} tasks) |`);
+      lines.push(baseline2 ? "|---|---|---|---|" : "|---|---|");
+      for (const [k, label] of MEASURES) {
+        const now2 = recent.medians[k];
+        if (!baseline2) {
+          lines.push(`| ${label} | ${fmt(k, now2)} |`);
+          continue;
+        }
+        const before = baseline2.summary.medians[k];
+        const change2 = before && recent.tasks ? `${now2 <= before ? "\u2212" : "+"}${Math.round(Math.abs(now2 - before) / before * 100)}%` : "\u2014";
+        lines.push(`| ${label} | ${fmt(k, before)} | ${fmt(k, now2)} | ${change2} |`);
+      }
+      if (!recent.tasks) lines.push("", "No task measured since Archivist started: the comparison comes with the first analysed tasks.");
+      else if (baseline2 && (baseline2.summary.tasks < 5 || recent.tasks < 5)) lines.push("", "Fewer than 5 tasks on one side: the change is noise until there are more.");
+      return lines.join("\n");
+    };
+  }
+});
+
+// src/core/validate.ts
+var PROCEDURE_CHARS, DUP_ENTRY, PARAPHRASE, DUP_DOC, DOC_COVERAGE, family, findDuplicate, sameFact, docWindows, clamp01, docParagraphs, validateOps;
+var init_validate = __esm({
+  "src/core/validate.ts"() {
+    "use strict";
+    init_ledger();
+    init_privacy();
+    init_text();
+    init_types();
+    PROCEDURE_CHARS = 1500;
+    DUP_ENTRY = 0.6;
+    PARAPHRASE = { jaccard: 0.35, overlap: 0.55 };
+    DUP_DOC = 0.6;
+    DOC_COVERAGE = 0.6;
+    family = (t) => t === "command" || t === "gotcha" ? "fact" : t;
+    findDuplicate = (entries, type, title2, content) => {
+      const text = `${title2} ${content}`;
+      let best;
+      for (const e of entries) {
+        if (e.status !== "active" || family(e.type) !== family(type)) continue;
+        const other = `${e.title} ${e.content}`;
+        if (e.type === type && jaccard(other, text) >= DUP_ENTRY) return e;
+        if (e.type === "command" && type === "command" && firstCode(e.content) && firstCode(content) && firstCode(e.content) !== firstCode(content)) continue;
+        const s = stemSimilarity(other, text);
+        if (s.jaccard >= PARAPHRASE.jaccard && s.overlap >= PARAPHRASE.overlap && (!best || s.jaccard > best.score)) best = { e, score: s.jaccard };
+      }
+      return best?.e;
+    };
+    sameFact = (a, b) => {
+      if (jaccard(a, b) >= DUP_ENTRY) return true;
+      const s = stemSimilarity(a, b);
+      return s.jaccard >= PARAPHRASE.jaccard && s.overlap >= PARAPHRASE.overlap;
+    };
+    docWindows = (docs) => {
+      const lines = docs.flatMap((d) => d.split("\n")).map((l) => l.trim()).filter((l) => l.length > 20);
+      return lines.map((_, i) => lines.slice(i, i + 3).join(" "));
+    };
+    clamp01 = (n) => typeof n === "number" && Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+    docParagraphs = (docs) => docs.flatMap((d) => d.split(/\n\s*\n|\n(?=[-*] )/)).map((p) => p.trim()).filter((p) => p.length > 20);
+    validateOps = async (args) => {
+      const { ops, entries, io, config, now: now2, src } = args;
+      const out = { records: [], applied: [], proposals: [], rejected: [], firstSightings: [], promoted: [] };
+      const paragraphs = docParagraphs(args.docs);
+      const windows = docWindows(args.docs);
+      const taken = new Set(entries.keys());
+      let adr = nextAdr(entries.values());
+      const touched = /* @__PURE__ */ new Set();
+      const active = (id) => {
+        const e = entries.get(id);
+        return e && e.status === "active" ? e : void 0;
+      };
+      const route = (confidence, type) => confidence >= config.apply.autoConfidence && config.apply.autoTypes.includes(type) ? "apply" : "propose";
+      for (const raw of ops) {
+        const op = raw;
+        if (!op || typeof op !== "object" || !("op" in op)) {
+          out.rejected.push({ op, reason: "not an op" });
+          continue;
+        }
+        if (op.op === "add") {
+          if (!ENTRY_TYPES.includes(op.type)) {
+            out.rejected.push({ op, reason: `unknown type ${String(op.type)}` });
+            continue;
+          }
+          const t = redact(truncate(String(op.title ?? "").trim(), 120));
+          const c = redact(truncate(String(op.content ?? "").trim(), op.type === "procedure" ? PROCEDURE_CHARS : config.budgets.maxContentChars));
+          const r = op.rationale ? redact(truncate(String(op.rationale).trim(), config.budgets.maxContentChars)) : void 0;
+          const title2 = t.text;
+          const content = c.text;
+          if (!title2 || !content) {
+            out.rejected.push({ op, reason: "empty title or content" });
+            continue;
+          }
+          let confidence = clamp01(op.confidence);
+          const notes = [];
+          if (t.count + c.count + (r?.count ?? 0)) {
+            confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+            notes.push("secrets redacted");
+          }
+          const ticket = ticketRef(`${title2} ${content} ${r?.text ?? ""}`);
+          if (ticket) {
+            confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+            notes.push(`tied to ticket ${ticket}`);
+          }
+          if ((args.skipped ?? []).some((s) => jaccard(s, `${title2} ${content}`) >= DUP_ENTRY)) {
+            out.rejected.push({ op, reason: "skipped in an earlier review" });
+            continue;
+          }
+          if (op.type === "procedure" && args.source !== "user") {
+            if (!(args.procedureCandidates ?? []).some((s) => jaccard(s, `${title2} ${content}`) >= 0.4)) {
+              out.firstSightings.push(`${title2} ${content}`);
+              out.rejected.push({ op, reason: "procedure seen once: waiting for a repeat" });
+              continue;
+            }
+            confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+            notes.push("seen in an earlier task too");
+          }
+          const dup = findDuplicate(entries.values(), op.type, title2, content);
+          if (dup) {
+            if (!touched.has(dup.id)) {
+              touched.add(dup.id);
+              out.records.push({ v: 1, ts: now2, op: "reinforce", id: dup.id, src });
+              out.applied.push({ op: { op: "reinforce", id: dup.id }, id: dup.id, type: dup.type, title: dup.title, reason: "duplicate of existing entry" });
+            }
+            continue;
+          }
+          const fact = `${title2} ${content}`;
+          const tiny = new Set(fact.match(/\S+/g) ?? []).size < 4;
+          const codes = op.type === "command" ? [...content.matchAll(/`([^`]+)`/g)].map((m) => m[1].replace(/\s+/g, " ").trim()).filter((c2) => c2.length >= 3) : [];
+          const codeInDocs = codes.some((c2) => c2.includes(" ")) && codes.every((c2) => args.docs.some((d) => d.includes(c2)));
+          if (codeInDocs || paragraphs.some((p) => jaccard(p, fact) >= DUP_DOC) || !tiny && windows.some((w) => coverage(fact, w) >= DOC_COVERAGE)) {
+            out.rejected.push({ op, reason: "already in project docs" });
+            continue;
+          }
+          const evidence = [];
+          for (const ev of op.evidence ?? []) {
+            if (!ev || typeof ev !== "object") continue;
+            if (ev.file && isExcluded(ev.file, config.privacy.excludePaths)) continue;
+            if (ev.file && !await io.exists(ev.file)) {
+              notes.push(`evidence file not found: ${ev.file}`);
+              continue;
+            }
+            evidence.push({ ...ev.file ? { file: ev.file } : {}, ...ev.anchor ? { anchor: String(ev.anchor) } : {} });
+          }
+          if ((op.evidence?.some((e) => e?.file) ?? false) && !evidence.some((e) => e.file)) confidence -= 0.3;
+          if (op.type === "decision" && !op.rationale) {
+            confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+            notes.push("decision without rationale");
+          }
+          const supersedes = (op.supersedes ?? []).filter((id2) => active(id2));
+          const id = newId(op.type, taken);
+          taken.add(id);
+          const entry = {
+            id,
+            type: op.type,
+            title: title2,
+            content,
+            ...r ? { rationale: r.text } : {},
+            ...op.scope?.paths?.length ? { scope: { paths: op.scope.paths.map(String) } } : {},
+            evidence,
+            status: "active",
+            confidence: clamp01(confidence),
+            source: args.source ?? "analyzer",
+            created: now2,
+            updated: now2,
+            ...op.type === "decision" ? { adr } : {},
+            ...supersedes.length ? { supersedes } : {},
+            ...op.savings && (op.savings.toolCalls || op.savings.tokens) ? { savings: { toolCalls: Number(op.savings.toolCalls) || 0, tokens: Number(op.savings.tokens) || 0 } } : {},
+            reinforced: 0
+          };
+          const earlier = route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title2} ${content}`)) : void 0;
+          if (earlier) {
+            entry.confidence = Math.max(entry.confidence, config.apply.autoConfidence);
+            notes.push("proposed again in a later task");
+            out.promoted.push(earlier.id);
+          }
+          const o = { op, id, type: op.type, title: title2, ...notes.length ? { reason: notes.join("; ") } : {} };
+          if (earlier || route(entry.confidence, op.type) === "apply") {
+            if (op.type === "decision") adr++;
+            out.records.push({ v: 1, ts: now2, op: "add", entry, src });
+            out.applied.push(o);
+          } else {
+            delete entry.adr;
+            out.proposals.push({ ...o, op: { ...op, title: title2, content } });
+          }
+          continue;
+        }
+        const target2 = "id" in op ? active(op.id) : void 0;
+        if (!target2) {
+          out.rejected.push({ op, reason: `no active entry ${"id" in op ? op.id : "?"}` });
+          continue;
+        }
+        if (touched.has(target2.id)) continue;
+        touched.add(target2.id);
+        const base = { op, id: target2.id, type: target2.type, title: target2.title };
+        if (op.op === "reinforce") {
+          out.records.push({ v: 1, ts: now2, op: "reinforce", id: target2.id, src });
+          out.applied.push(base);
+        } else if (op.op === "update") {
+          const clean = (s, max) => redact(truncate(s.trim(), max)).text;
+          const patch = {
+            ...op.title ? { title: clean(op.title, 120) } : {},
+            ...op.content ? { content: clean(op.content, config.budgets.maxContentChars) } : {},
+            ...op.rationale ? { rationale: clean(op.rationale, config.budgets.maxContentChars) } : {}
+          };
+          if (!Object.keys(patch).length) {
+            out.rejected.push({ ...base, reason: "empty update" });
+          } else if (route(clamp01(op.confidence), target2.type) === "apply") {
+            out.records.push({ v: 1, ts: now2, op: "update", id: target2.id, patch, src });
+            out.applied.push(base);
+          } else out.proposals.push(base);
+        } else if (op.op === "deprecate") {
+          if (clamp01(op.confidence) >= Math.max(0.9, config.apply.autoConfidence) && config.apply.autoTypes.includes(target2.type)) {
+            out.records.push({ v: 1, ts: now2, op: "deprecate", id: target2.id, reason: String(op.reason ?? ""), src });
+            out.applied.push({ ...base, reason: op.reason });
+          } else out.proposals.push({ ...base, reason: op.reason });
+        }
+      }
+      return out;
+    };
+  }
+});
+
+// src/core/review.ts
+var SKIPPED, listProposals, describeOp, reviewText, pick, needsHuman, reviewJson, asUser, record, stillWaiting, applyProposals, skipProposals, addEntry, editFromOptions, activeEntry, editEntry, deprecateEntry;
+var init_review = __esm({
+  "src/core/review.ts"() {
+    "use strict";
+    init_io();
+    init_args();
+    init_ledger();
+    init_lock();
+    init_metrics();
+    init_privacy();
+    init_text();
+    init_render();
+    init_types();
+    init_validate();
+    SKIPPED = ".archivist/.local/skipped.jsonl";
+    listProposals = async (io) => {
+      const names = (await io.list(PATHS.proposals)).filter((n) => n.endsWith(".json")).sort();
+      const out = [];
+      for (const name of names) {
+        const path = joinPath(PATHS.proposals, name);
+        try {
+          const p = JSON.parse(await io.read(path) ?? "");
+          out.push({ n: out.length + 1, id: name.replace(/\.json$/, ""), ts: p.ts ?? "", path, op: p.op, reason: p.reason ?? null, ...p.src ? { src: p.src } : {} });
+        } catch {
+        }
+      }
+      return out;
+    };
+    describeOp = (op) => {
+      if (op.op === "add") return `+ [${op.type}] ${op.title}: ${op.content}${op.rationale ? ` (why: ${op.rationale})` : ""}`;
+      if (op.op === "update") return `~ ${op.id}: ${op.content ?? op.title ?? ""}`;
+      if (op.op === "deprecate") return `\u2212 ${op.id}: ${op.reason}`;
+      return `\u2191 ${op.id}`;
+    };
+    reviewText = (proposals) => proposals.length ? [
+      `${proposals.length} proposal(s) waiting for review:`,
+      ...proposals.map((p) => `${p.n}. ${describeOp(p.op)}${p.reason ? `  \u2014 ${p.reason}` : ""}`),
+      "",
+      "apply <n|all> records a proposal as is; skip <n|all> drops it and keeps the idea from coming back.",
+      "Or let the agent do it: /archivist:triage checks the technical ones in the code and asks you only about decisions and removals.",
+      "Unreviewed proposals expire on their own; a fact that matters comes up again and a repeat records it.",
+      `To edit before applying, change the op in its file under ${PATHS.proposals}/ and apply it.`
+    ].join("\n") : "No proposals waiting for review.";
+    pick = (proposals, which) => {
+      if (which.trim() === "all") return proposals;
+      const keys = new Set(which.split(/[\s,]+/).filter(Boolean));
+      return proposals.filter((p) => keys.has(String(p.n)) || keys.has(p.id));
+    };
+    needsHuman = (op) => op.op === "deprecate" || op.op === "add" && op.type === "decision";
+    reviewJson = (proposals) => JSON.stringify(proposals.map((p) => ({ id: p.id, n: p.n, ts: p.ts, human: needsHuman(p.op), reason: p.reason, op: p.op })), null, 1);
+    asUser = (config) => ({ ...config, apply: { autoConfidence: 0, autoTypes: [...ENTRY_TYPES] } });
+    record = async (io, config, ops, now2, src) => {
+      const state = await loadState(io);
+      const v = await validateOps({ ops, entries: state.entries, io, config: asUser(config), docs: [], now: now2, source: "user", ...src ? { src } : {} });
+      await appendLedger(io, v.records);
+      await renderAll(io, (await loadState(io)).entries, config);
+      return [...v.applied, ...v.rejected];
+    };
+    stillWaiting = async (io, chosen) => {
+      const out = [];
+      for (const p of chosen) if (await io.exists(p.path)) out.push(p);
+      return out;
+    };
+    applyProposals = async (io, config, chosen, now2) => withLock(io, async () => {
+      const outcomes = [];
+      for (const p of await stillWaiting(io, chosen)) {
+        outcomes.push(...await record(io, config, [{ ...p.op, confidence: 1 }], now2, p.src));
+        await io.remove?.(p.path);
+      }
+      return outcomes;
+    });
+    skipProposals = async (io, chosen, now2) => withLock(io, async () => {
+      const waiting = await stillWaiting(io, chosen);
+      const prev = await io.read(SKIPPED) ?? "";
+      const lines = waiting.map((p) => JSON.stringify({ ts: now2, text: p.op.op === "add" ? `${p.op.title} ${p.op.content}` : describeOp(p.op) }));
+      if (lines.length) await io.write(SKIPPED, prev + lines.join("\n") + "\n");
+      for (const p of waiting) await io.remove?.(p.path);
+      return waiting.length;
+    });
+    addEntry = async (io, config, fields, now2) => withLock(
+      io,
+      () => record(
+        io,
+        config,
+        [
+          {
+            op: "add",
+            type: fields.type,
+            title: fields.title,
+            content: fields.content,
+            ...fields.rationale ? { rationale: fields.rationale } : {},
+            ...fields.paths?.length ? { scope: { paths: fields.paths } } : {},
+            ...fields.evidence?.length ? { evidence: fields.evidence.map((file) => ({ file })) } : {},
+            confidence: 1
+          }
+        ],
+        now2
+      )
+    );
+    editFromOptions = (o) => ({
+      ...o.title ? { title: o.title } : {},
+      ...o.content ? { content: o.content } : {},
+      ...o.why ? { rationale: o.why } : {},
+      ..."paths" in o ? { paths: commaList(o.paths === "true" ? "" : o.paths) } : {}
+    });
+    activeEntry = async (io, id) => {
+      const e = (await loadState(io)).entries.get(id);
+      return e && e.status === "active" ? e : void 0;
+    };
+    editEntry = async (io, config, id, edit, now2) => withLock(io, async () => {
+      const e = await activeEntry(io, id);
+      if (!e) return { ok: false, reason: `no active entry ${id}` };
+      const max = e.type === "procedure" ? 1500 : config.budgets.maxContentChars;
+      const clean = (s, n) => redact(truncate(s.trim(), n)).text;
+      const patch = {};
+      if (edit.title?.trim() && edit.title.trim() !== e.title) patch.title = clean(edit.title, 120);
+      if (edit.content?.trim() && edit.content.trim() !== e.content) patch.content = clean(edit.content, max);
+      if (edit.rationale?.trim() && edit.rationale.trim() !== e.rationale) patch.rationale = clean(edit.rationale, max);
+      if (edit.paths && edit.paths.join("\n") !== (e.scope?.paths ?? []).join("\n")) patch.scope = { paths: edit.paths };
+      if (!Object.keys(patch).length) return { ok: false, reason: "nothing to change" };
+      await appendLedger(io, [{ v: 1, ts: now2, op: "update", id, patch }]);
+      const after = await loadState(io);
+      const r = await renderAll(io, after.entries, config);
+      return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
+    });
+    deprecateEntry = async (io, config, id, reason, now2) => withLock(io, async () => {
+      const e = await activeEntry(io, id);
+      if (!e) return { ok: false, reason: `no active entry ${id}` };
+      if (!reason.trim()) return { ok: false, reason: "say why: --reason" };
+      await appendLedger(io, [{ v: 1, ts: now2, op: "deprecate", id, reason: redact(reason.trim()).text }]);
+      const after = await loadState(io);
+      const r = await renderAll(io, after.entries, config);
+      return { ok: true, entry: after.entries.get(id), written: r.written, removed: r.removed };
+    });
+  }
+});
+
+// src/analyzer/signals.ts
+var EDIT_TOOLS, LOOK_TOOLS, LOOK_COMMAND, CORRECTION, lastStep, head, computeSignals;
+var init_signals = __esm({
+  "src/analyzer/signals.ts"() {
+    "use strict";
+    init_types();
+    EDIT_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+    LOOK_TOOLS = /* @__PURE__ */ new Set(["Read", "Grep", "Glob", "LS"]);
+    LOOK_COMMAND = /^(cat|head|tail|less|grep|rg|ag|find|fd|ls|tree|wc|sed -n|awk|jq)\b/;
+    CORRECTION = /(^|[\s,.!])(нет[,.!]|не так|неправильно|не надо|не нужно|запомни|remember[:,]|no[,.!]\s|wrong|don't|do not|instead)/i;
+    lastStep = (cmd) => (cmd.split(/&&|;/).at(-1) ?? cmd).trim();
+    head = (cmd) => lastStep(cmd).split(/\s+/)[0] ?? "";
+    computeSignals = (seg) => {
+      const edits = [];
+      let readsBeforeFirstEdit = 0;
+      const reads = /* @__PURE__ */ new Map();
+      const failed = [];
+      const recovered = [];
+      const open2 = [];
+      for (const t of seg.tools) {
+        if (EDIT_TOOLS.has(t.tool)) {
+          if (t.target && !edits.includes(t.target)) edits.push(t.target);
+        } else if (LOOK_TOOLS.has(t.tool)) {
+          if (!edits.length) readsBeforeFirstEdit++;
+          if (t.tool === "Read" && t.target) reads.set(t.target, (reads.get(t.target) ?? 0) + 1);
+        } else if (t.tool === "Bash" && t.target) {
+          if (t.ok && LOOK_COMMAND.test(lastStep(t.target))) {
+            if (!edits.length) readsBeforeFirstEdit++;
+            continue;
+          }
+          if (!t.ok) {
+            failed.push({ command: t.target, ...t.error ? { error: t.error } : {} });
+            open2.push(t.target);
+          } else {
+            const i = open2.findIndex((f) => head(f) === head(t.target));
+            if (i >= 0) {
+              recovered.push({ failed: open2[i], succeeded: t.target });
+              open2.splice(i, 1);
+            }
+          }
+        }
+      }
+      return {
+        turns: seg.turns.length,
+        durationMs: seg.turns.reduce((s, t) => s + t.durationMs, 0),
+        usage: seg.turns.reduce((u, t) => addUsage(u, t.usage), emptyUsage()),
+        toolCalls: seg.tools.length,
+        edits,
+        readsBeforeFirstEdit,
+        repeatedReads: [...reads].filter(([, n]) => n > 1).map(([file, times]) => ({ file, times })),
+        failedCommands: failed,
+        recoveredCommands: recovered,
+        corrections: seg.prompts.slice(1).filter((p) => CORRECTION.test(p)),
+        rulesLoaded: [...new Set(seg.rulesLoaded.map((r) => r.file))]
+      };
+    };
+  }
+});
+
+// src/adapters/claude/cli/transcript.ts
+import { readdir as readdir3, readFile as readFile3 } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join as join3 } from "node:path";
+var transcriptDir, target, promptText, segmentsFromTranscript, readProjectSegments;
+var init_transcript = __esm({
+  "src/adapters/claude/cli/transcript.ts"() {
+    "use strict";
+    init_io();
+    init_text();
+    init_types();
+    transcriptDir = (root, home = homedir()) => join3(home, ".claude", "projects", root.replace(/[^A-Za-z0-9]/g, "-"));
+    target = (root, tool, input = {}) => {
+      const v = input.file_path ?? input.notebook_path ?? input.command ?? input.pattern ?? input.path ?? input.url;
+      if (typeof v !== "string") return void 0;
+      return tool === "Bash" ? truncate(v.replace(/\s+/g, " ").trim(), 200) : relPath(root, v);
+    };
+    promptText = (l) => {
+      if (l.type !== "user" || l.isMeta || l.isSidechain) return void 0;
+      const c = l.message?.content;
+      const text = typeof c === "string" ? c : Array.isArray(c) && !c.some((b) => b.type === "tool_result") ? c.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n") : void 0;
+      return text && text.trim() && !/^<(command|local-command)/.test(text.trim()) ? text : void 0;
+    };
+    segmentsFromTranscript = (text, root, session) => {
+      const segments = [];
+      const pending = /* @__PURE__ */ new Map();
+      const usageById = /* @__PURE__ */ new Map();
+      let seg;
+      let first = 0;
+      let last = 0;
+      const close = () => {
+        if (!seg) return;
+        let usage = emptyUsage();
+        for (const u of usageById.values())
+          usage = addUsage(usage, { input: u.input_tokens ?? 0, output: u.output_tokens ?? 0, cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0 });
+        seg.turns = [{ turnId: `${seg.id}-0`, durationMs: Math.max(0, last - first), usage }];
+        segments.push(seg);
+        usageById.clear();
+        pending.clear();
+      };
+      for (const raw of text.split("\n")) {
+        if (!raw.trim()) continue;
+        let l;
+        try {
+          l = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        const t = l.timestamp ? Date.parse(l.timestamp) : NaN;
+        const prompt = promptText(l);
+        if (prompt) {
+          close();
+          seg = { id: `${session.slice(0, 8)}-${segments.length}`, session, startedAt: Number.isNaN(t) ? 0 : t, prompts: [prompt], answers: [], turns: [], tools: [], rulesLoaded: [] };
+          first = last = Number.isNaN(t) ? 0 : t;
+          continue;
+        }
+        if (!seg || l.isSidechain) continue;
+        if (!Number.isNaN(t)) last = t;
+        const blocks = Array.isArray(l.message?.content) ? l.message.content : [];
+        if (l.type === "assistant") {
+          if (l.message?.id && l.message.usage) usageById.set(l.message.id, l.message.usage);
+          for (const b of blocks) {
+            if (b.type !== "tool_use" || !b.id || !b.name) continue;
+            const ev = { tool: b.name, ok: true };
+            const tg = target(root, b.name, b.input);
+            if (tg) ev.target = tg;
+            pending.set(b.id, ev);
+            seg.tools.push(ev);
+          }
+        } else if (l.type === "user") {
+          for (const b of blocks) {
+            if (b.type !== "tool_result" || !b.tool_use_id) continue;
+            const ev = pending.get(b.tool_use_id);
+            if (!ev || !b.is_error) continue;
+            ev.ok = false;
+            const body = typeof b.content === "string" ? b.content : JSON.stringify(b.content ?? "");
+            ev.error = truncate(body.replace(/\s+/g, " "), 300);
+          }
+        }
+      }
+      close();
+      return segments;
+    };
+    readProjectSegments = async (root, before, dir = transcriptDir(root)) => {
+      let names = [];
+      try {
+        names = (await readdir3(dir)).filter((n) => n.endsWith(".jsonl"));
+      } catch {
+        return { sessions: 0, segments: [] };
+      }
+      const segments = [];
+      let sessions = 0;
+      for (const name of names) {
+        const segs = segmentsFromTranscript(await readFile3(join3(dir, name), "utf8"), root, name.replace(/\.jsonl$/, "")).filter((s) => s.startedAt < before.getTime());
+        if (segs.length) sessions++;
+        segments.push(...segs);
+      }
+      return { sessions, segments };
+    };
+  }
+});
+
+// src/core/memory.ts
+var memoryCachePath, loadMemoryCaches;
+var init_memory = __esm({
+  "src/core/memory.ts"() {
+    "use strict";
+    init_io();
+    init_ledger();
+    init_lock();
+    init_render();
+    memoryCachePath = (store) => `.archivist/.local/memory-${store}.json`;
+    loadMemoryCaches = async (io) => {
+      const caches = [];
+      for (const name of await io.list(".archivist/.local")) {
+        const store = name.match(/^memory-(.+)\.json$/)?.[1];
+        if (!store) continue;
+        try {
+          const cache = JSON.parse(await io.read(memoryCachePath(store)) ?? "null");
+          if (cache?.items) caches.push(cache);
+        } catch {
+          continue;
+        }
+      }
+      return caches;
+    };
+  }
+});
+
+// src/core/maintenance.ts
+var RECENT, statsText, score, recallText, gcCandidates, gcRecords, lint, WEEK, memoryLines, healthText;
+var init_maintenance = __esm({
+  "src/core/maintenance.ts"() {
+    "use strict";
+    init_io();
+    init_ledger();
+    init_memory();
+    init_metrics();
+    init_review();
+    init_render();
+    init_text();
+    init_usage();
+    RECENT = 30;
+    statsText = async (io, entries) => {
+      const live2 = (await loadMetrics(io)).filter((m) => m.source === "live").slice(-RECENT);
+      const baseline2 = await loadBaseline(io);
+      const recent = summarize(live2);
+      const usage = await loadUsage(io);
+      const active = activeEntries(entries);
+      const lines = ["# Archivist stats", "", compareText(baseline2, recent), ""];
+      const promised = active.filter((e) => e.savings && (usage[e.id]?.used ?? 0) > 0);
+      if (promised.length) {
+        const calls = promised.reduce((s, e) => s + (e.savings.toolCalls ?? 0) * usage[e.id].used, 0);
+        const observed = baseline2 ? Math.round((baseline2.summary.medians.toolCalls - recent.medians.toolCalls) * recent.tasks) : void 0;
+        lines.push(
+          `Estimated by the analyzer for the entries tasks used: \u2248 ${calls} tool calls saved.` + (observed !== void 0 ? ` Observed against the baseline: \u2248 ${observed} over ${recent.tasks} tasks.` : ""),
+          ""
+        );
+      }
+      const row = (e) => {
+        const u = usage[e.id];
+        return `| \`${e.id}\` ${e.title} | ${u?.seen ?? 0} | ${u?.used ?? 0} | ${u?.helpful ?? 0} | ${u?.harmful ?? 0} |`;
+      };
+      const touched = active.filter((e) => usage[e.id]).sort((a, b) => score(usage, b) - score(usage, a));
+      lines.push(`${active.length} active entries; ${touched.length} met in a task, ${active.length - touched.length} never yet.`);
+      if (touched.length) lines.push("", "| entry | seen | used | helpful | harmful |", "|---|---|---|---|---|", ...touched.slice(0, 15).map(row));
+      const flagged = active.filter((e) => (usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0));
+      if (flagged.length) lines.push("", `Judged wrong more often than helpful: ${flagged.map((e) => `\`${e.id}\``).join(", ")}. See /archivist review.`);
+      return lines.join("\n") + "\n";
+    };
+    score = (u, e) => (u[e.id]?.used ?? 0) + (u[e.id]?.helpful ?? 0) * 2 - (u[e.id]?.harmful ?? 0) * 2;
+    recallText = (entries, query, k = 5) => {
+      const active = activeEntries(entries);
+      const hits = bm25(active.map((e) => `${e.title} ${e.content} ${e.rationale ?? ""} ${e.scope?.paths.join(" ") ?? ""}`), query).slice(0, k);
+      if (!hits.length) return `Nothing recorded about "${query}".`;
+      return hits.map(({ index }) => {
+        const e = active[index];
+        const where = e.type === "decision" ? ` \u2192 ${adrPath(e)}` : e.scope ? ` (${e.scope.paths.join(", ")})` : "";
+        return `- \`${e.id}\` [${e.type}] ${e.title}: ${e.content.replace(/\s*\n\s*/g, " ")}${where}`;
+      }).join("\n");
+    };
+    gcCandidates = async (io, entries, days, now2) => unusedFor(
+      activeEntries(entries).filter((e) => e.type !== "decision"),
+      await loadUsage(io),
+      days,
+      now2
+    );
+    gcRecords = (stale, days, ts) => stale.map((e) => ({ v: 1, ts, op: "deprecate", id: e.id, reason: `unused for ${days} days` }));
+    lint = async (io, entries, config) => {
+      const out = [];
+      const active = activeEntries(entries);
+      for (let i = 0; i < active.length; i++)
+        for (let j = i + 1; j < active.length; j++) {
+          const a = active[i];
+          const b = active[j];
+          if (a.type !== b.type) continue;
+          const sim = jaccard(`${a.title} ${a.content}`, `${b.title} ${b.content}`);
+          if (sim >= 0.45) out.push({ level: "warn", text: `\`${a.id}\` and \`${b.id}\` say much the same (${Math.round(sim * 100)}%): merge, or one contradicts the other` });
+          else if (a.type === "command" && a.title.toLowerCase() === b.title.toLowerCase())
+            out.push({ level: "warn", text: `\`${a.id}\` and \`${b.id}\` are both "${a.title}" with different commands: which one is right?` });
+        }
+      for (const id of await findStale(io, entries)) out.push({ level: "warn", text: `\`${id}\` is stale: every file it cites is gone` });
+      const usage = await loadUsage(io);
+      for (const e of active) {
+        if (e.type === "decision" && !e.rationale) out.push({ level: "warn", text: `\`${e.id}\` is a decision without a reason` });
+        if ((usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0)) out.push({ level: "warn", text: `\`${e.id}\` was judged wrong more often than helpful` });
+        if (!e.evidence.some((v) => v.file) && e.type !== "decision") out.push({ level: "info", text: `\`${e.id}\` cites no file: it cannot go stale when the code changes` });
+      }
+      const core = renderCore([...entries.values()], config);
+      const omitted = core.match(/(\d+) more in `/);
+      if (omitted) out.push({ level: "warn", text: `${omitted[1]} entries do not fit in ${PATHS.coreRule} (${config.budgets.coreLines} lines): scope some to paths, or retire some` });
+      return out;
+    };
+    WEEK = 7 * 864e5;
+    memoryLines = (memories) => memories.flatMap((m) => [
+      `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
+      ...m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : [],
+      ...m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : [],
+      ...m.lastError ? [`- last error: ${m.lastError}`] : []
+    ]);
+    healthText = async (io, entries, config, now2, extras = {}) => {
+      const since = new Date(now2.getTime() - WEEK).toISOString();
+      const active = activeEntries(entries);
+      const by = (t) => active.filter((e) => e.type === t).length;
+      const stale = await findStale(io, entries);
+      const queue = await listProposals(io);
+      const human = queue.filter((p) => needsHuman(p.op)).length;
+      const coreText = await io.read(PATHS.coreRule) ?? "";
+      const coreLines = Math.max(0, coreText.split("\n").length - 1);
+      const coreChars = coreText.length;
+      const areas = groupAreas(active, stale).size;
+      const week = (await loadAnalyses(io)).filter((a) => a.ts >= since);
+      const done = week.filter((a) => a.outcome === "done");
+      const tasks = (await loadMetrics(io)).filter((m) => m.source === "live" && m.ts >= since).length;
+      const errors = week.filter((a) => a.error).length;
+      const logWeek = (extras.log ?? []).filter((l) => l.slice(0, 24) >= since);
+      const failed = logWeek.filter((l) => l.includes(": failed:")).length;
+      const postponed = logWeek.filter((l) => l.includes(": postponed:")).length;
+      const recorded = done.reduce((s, a) => s + a.applied, 0);
+      const proposed = done.reduce((s, a) => s + a.proposals, 0);
+      const spent = week.reduce((s, a) => s + a.tokens, 0);
+      const usage = await loadUsage(io);
+      const met = active.filter((e) => usage[e.id]).length;
+      const neverMet = config.rules.files ? active.filter((e) => e.type !== "decision" && !stale.has(e.id) && !usage[e.id] && e.created < since) : [];
+      const wrong = active.filter((e) => (usage[e.id]?.harmful ?? 0) > (usage[e.id]?.helpful ?? 0));
+      const warnings = (await lint(io, entries, config)).filter((f) => f.level === "warn");
+      const k = (n) => n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
+      const lines = [
+        "# Archivist health",
+        "",
+        "## Knowledge",
+        `- ${active.length} active entries: ${by("command")} commands, ${by("gotcha")} gotchas, ${by("decision")} decisions, ${by("procedure")} procedures; ${entries.size - active.length} retired; ${stale.size} stale`,
+        `- always loaded: ${PATHS.coreRule} ${coreLines}/${config.budgets.coreLines} lines, ${coreChars}/${config.budgets.coreChars} chars (\u2248 ${Math.round(coreChars / 3)} tokens every session); ${areas} path-scoped rule files`,
+        `- review queue: ${queue.length}${human ? ` (${human} decisions or removals wait for you)` : ""}`,
+        "",
+        "## Last 7 days",
+        week.length || !tasks ? `- ${tasks} tasks seen; ${week.length} analysed: ${done.length} fully, ${week.length - done.length} skipped as trivial` : `- ${tasks} tasks seen; the analysis journal starts with Archivist 1.3.0, so these counts fill in from the next analysed task`,
+        `- recorded ${recorded} entries, proposed ${proposed}; analysis cost ${k(spent)} weighted tokens${extras.spentToday !== void 0 ? ` (today ${k(extras.spentToday)} of ${k(config.analyzer.maxTokensPerDay)})` : ""}`,
+        `- problems: ${errors} analyses with model errors${extras.log ? `, ${failed} failed, ${postponed} postponed` : ""}`,
+        "",
+        "## Entries in use",
+        `- ${met} of ${active.length} met in a task (rule loaded, command run, or confirmed)`,
+        ...neverMet.length ? [`- never met, older than a week: ${neverMet.slice(0, 5).map((e) => `\`${e.id}\` ${e.title}`).join("; ")}${neverMet.length > 5 ? ` and ${neverMet.length - 5} more` : ""}`] : [],
+        ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
+      ];
+      const memories = await loadMemoryCaches(io);
+      if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
+      if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
+      const todo = [];
+      if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
+      if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
+      if (memories.some((m) => m.lastError)) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
+      if (!config.rules.files && !memories.some((m) => Object.keys(m.items).length))
+        todo.push("rule files are off and no memory has received the entries: no agent sees them (connect a memory plugin, or set rules.files to true)");
+      if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
+      if (neverMet.length >= 3) todo.push(`${neverMet.length} entries never met in a week: archivist gc --days 7 lists them, --apply retires them`);
+      if (warnings.some((w) => !w.text.includes("stale") && !w.text.includes("judged wrong"))) todo.push("lint findings above: merge or fix them with /archivist edit or /archivist deprecate");
+      if (coreLines > config.budgets.coreLines * 0.9 || coreChars > config.budgets.coreChars * 0.9) todo.push(`${PATHS.coreRule} is near its budget: scope entries to paths (/archivist edit <id> --paths "\u2026")`);
+      if (week.length >= 5 && !done.some((a) => a.applied || a.proposals)) todo.push("nothing recorded in a week of tasks: the thresholds may be too strict (analyzer.minToolCalls, apply.autoConfidence)");
+      if (!await loadBaseline(io)) todo.push("no baseline yet: archivist baseline, so /archivist stats can show the effect");
+      lines.push("", "## What to do", ...todo.length ? todo.map((t) => `- ${t}`) : ["- Nothing: Archivist is doing fine here."]);
+      return lines.join("\n") + "\n";
+    };
+  }
+});
+
+// src/cli/scan.ts
+var USEFUL, titlesEn, titlesRu, isRussian, title, packageManager, scriptCommand, scanCommands;
+var init_scan = __esm({
+  "src/cli/scan.ts"() {
+    "use strict";
+    USEFUL = /^(test|tests|build|lint|typecheck|type-check|check|dev|start|format|fmt|e2e|ci|verify)([:-].+)?$/;
+    titlesEn = {
+      test: "Run tests",
+      tests: "Run tests",
+      build: "Build",
+      lint: "Lint",
+      typecheck: "Typecheck",
+      "type-check": "Typecheck",
+      check: "Run all checks",
+      dev: "Start dev server",
+      start: "Start",
+      format: "Format code",
+      fmt: "Format code",
+      e2e: "Run e2e tests",
+      ci: "Run the CI pipeline locally",
+      verify: "Verify"
+    };
+    titlesRu = {
+      test: "\u0417\u0430\u043F\u0443\u0441\u043A \u0442\u0435\u0441\u0442\u043E\u0432",
+      tests: "\u0417\u0430\u043F\u0443\u0441\u043A \u0442\u0435\u0441\u0442\u043E\u0432",
+      build: "\u0421\u0431\u043E\u0440\u043A\u0430",
+      lint: "\u041B\u0438\u043D\u0442\u0435\u0440",
+      typecheck: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u0442\u0438\u043F\u043E\u0432",
+      "type-check": "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u0442\u0438\u043F\u043E\u0432",
+      check: "\u0412\u0441\u0435 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438",
+      dev: "Dev-\u0441\u0435\u0440\u0432\u0435\u0440",
+      start: "\u0417\u0430\u043F\u0443\u0441\u043A",
+      format: "\u0424\u043E\u0440\u043C\u0430\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435",
+      fmt: "\u0424\u043E\u0440\u043C\u0430\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435",
+      e2e: "E2e-\u0442\u0435\u0441\u0442\u044B",
+      ci: "CI \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E",
+      verify: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430"
+    };
+    isRussian = (language) => /^(ru|russian|рус)/i.test(language);
+    title = (name, language) => {
+      const [base, rest] = name.split(/[:-](.+)/);
+      const t = (isRussian(language) ? titlesRu : titlesEn)[base ?? name] ?? name;
+      return rest ? `${t} (${rest})` : t;
+    };
+    packageManager = async (io) => {
+      if (await io.exists("pnpm-lock.yaml")) return "pnpm";
+      if (await io.exists("yarn.lock")) return "yarn";
+      if (await io.exists("bun.lockb") || await io.exists("bun.lock")) return "bun";
+      return "npm";
+    };
+    scriptCommand = (pm, name) => {
+      if (pm === "npm") return name === "test" || name === "start" ? `npm ${name}` : `npm run ${name}`;
+      if (pm === "bun") return `bun run ${name}`;
+      return `${pm} ${name}`;
+    };
+    scanCommands = async (io, language = "auto") => {
+      const ops = [];
+      const add2 = (name, cmd, detail, file, anchor) => ops.push({
+        op: "add",
+        type: "command",
+        title: title(name, language),
+        content: `\`${cmd}\`${detail ? ` \u2014 ${isRussian(language) ? detail.replace(/^runs /, "\u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0435\u0442 ") : detail}` : ""}`,
+        evidence: [{ file, anchor }],
+        confidence: 0.85
+      });
+      const pkg = await io.read("package.json");
+      if (pkg) {
+        try {
+          const scripts = JSON.parse(pkg).scripts ?? {};
+          const pm = await packageManager(io);
+          for (const [name, body] of Object.entries(scripts)) {
+            if (!USEFUL.test(name)) continue;
+            add2(name, scriptCommand(pm, name), `runs \`${body}\``, "package.json", `scripts.${name}`);
+          }
+        } catch {
+        }
+      }
+      for (const [file, runner] of [
+        ["Makefile", "make"],
+        ["justfile", "just"]
+      ]) {
+        const text = await io.read(file);
+        if (!text) continue;
+        for (const m of text.matchAll(/^([A-Za-z0-9_-]+):(?!=)/gm)) {
+          const name = m[1];
+          if (USEFUL.test(name)) add2(name, `${runner} ${name}`, "", file, name);
+        }
+      }
+      if (await io.exists("Cargo.toml")) {
+        add2("build", "cargo build", "", "Cargo.toml", "package");
+        add2("test", "cargo test", "", "Cargo.toml", "package");
+      }
+      if (await io.exists("go.mod")) add2("test", "go test ./...", "", "go.mod", "module");
+      return ops;
+    };
+  }
+});
+
+// src/cli/panel.ts
+import { randomBytes, createHash as createHash2 } from "node:crypto";
+import { createServer } from "node:http";
+import { basename } from "node:path";
+var panelSnapshot, script, panelHtml, startPanel;
+var init_panel = __esm({
+  "src/cli/panel.ts"() {
+    "use strict";
+    init_ledger();
+    init_review();
+    panelSnapshot = async (io) => {
+      const [state, proposals] = await Promise.all([loadState(io), listProposals(io)]);
+      const entries = activeEntries(state.entries).map(({ id, type, title: title2, content }) => ({ id, type, title: title2, content }));
+      return {
+        project: basename(io.root),
+        entries,
+        proposals: proposals.map((p) => ({ id: p.id, text: describeOp(p.op), reason: p.reason })),
+        counts: { entries: entries.length, review: proposals.length },
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    };
+    script = `
+const project = document.querySelector('#project');
+const list = document.querySelector('#list');
+const status = document.querySelector('#status');
+const search = document.querySelector('#search');
+const tabs = [...document.querySelectorAll('[data-view]')];
+let snapshot;
+let view = 'entries';
+function draw() {
+  if (!snapshot) return;
+  const query = search.value.toLocaleLowerCase();
+  const items = snapshot[view];
+  const matches = items.filter(item => JSON.stringify(item).toLocaleLowerCase().includes(query));
+  list.replaceChildren();
+  if (!matches.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = query ? '\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E' : view === 'entries' ? '\u0421\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u044B\u0445 \u0437\u0430\u043F\u0438\u0441\u0435\u0439 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442' : '\u041F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u0439 \u043D\u0430 \u0440\u0435\u0432\u044C\u044E \u043D\u0435\u0442';
+    list.append(empty);
+  }
+  for (const item of matches) {
+    const card = document.createElement('article');
+    const title = document.createElement('h2');
+    title.textContent = item.title || item.text;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = [item.type, item.id].filter(Boolean).join(' \xB7 ');
+    card.append(meta, title);
+    if (item.content || item.reason) {
+      const body = document.createElement('p');
+      body.textContent = item.content || item.reason;
+      card.append(body);
+    }
+    list.append(card);
+  }
+  document.querySelector('#review-help').hidden = view !== 'proposals';
+  tabs.forEach(tab => tab.setAttribute('aria-pressed', String(tab.dataset.view === view)));
+}
+tabs.forEach(tab => tab.addEventListener('click', () => { view = tab.dataset.view; draw(); }));
+search.addEventListener('input', draw);
+async function refresh() {
+  try {
+    const response = await fetch('./state', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error('unavailable');
+    snapshot = await response.json();
+    project.textContent = snapshot.project;
+    document.querySelector('#entries-count').textContent = snapshot.counts.entries;
+    document.querySelector('#review-count').textContent = snapshot.counts.review;
+    status.textContent = '\u041E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u043E \u0432 ' + new Date(snapshot.updatedAt).toLocaleTimeString('ru-RU') + ' \xB7 \u043A\u0430\u0436\u0434\u044B\u0435 3 \u0441\u0435\u043A\u0443\u043D\u0434\u044B';
+    status.className = '';
+    draw();
+  } catch {
+    status.textContent = '\u041D\u0435\u0442 \u0441\u0432\u044F\u0437\u0438 \u0441 Archivist. \u0414\u0430\u043D\u043D\u044B\u0435 \u043C\u043E\u0433\u043B\u0438 \u0443\u0441\u0442\u0430\u0440\u0435\u0442\u044C. \u041F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u043C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435\u2026';
+    status.className = 'error';
+  } finally { setTimeout(refresh, 3000); }
+}
+refresh();
+`;
+    panelHtml = `<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Archivist</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif;background:light-dark(#f7f8fa,#14171c);color:light-dark(#202938,#e6eaf0)}
+*{box-sizing:border-box}body{margin:0;padding:28px;max-width:960px;margin-inline:auto}header{display:flex;align-items:center;gap:12px}h1{font-size:22px;margin:0}header span{color:light-dark(#687486,#9caabd);overflow-wrap:anywhere}nav{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:26px 0 14px}button{font:inherit;cursor:pointer;text-align:left;border:1px solid light-dark(#d8dfe8,#3b4554);background:light-dark(#fff,#1c222c);color:inherit;border-radius:14px;padding:18px}button[aria-pressed=true]{border-color:#728aff;box-shadow:0 0 0 1px #728aff}strong{display:block;font-size:34px;margin-top:8px}input{width:100%;font:inherit;padding:12px 14px;border-radius:10px;border:1px solid light-dark(#d8dfe8,#3b4554);background:light-dark(#fff,#1c222c);color:inherit}#status,.meta,.empty{font-size:13px;color:light-dark(#687486,#9caabd)}#status.error{color:light-dark(#a53620,#ffad93)}article{background:light-dark(#fff,#1c222c);border:1px solid light-dark(#e1e6ed,#303948);border-radius:12px;padding:18px;margin-top:12px;overflow-wrap:anywhere}h2{font-size:16px;line-height:1.5;margin:8px 0}article p{font-size:14px;white-space:pre-wrap;line-height:1.6;margin-bottom:0}.empty{padding:40px 0;text-align:center}#review-help{font-size:13px;line-height:1.6}button:focus-visible,input:focus-visible{outline:3px solid #728aff;outline-offset:3px}@media(max-width:440px){body{padding:16px}button{padding:14px}}
+</style></head><body>
+<header><h1>\u{1F4DA} Archivist</h1><span id="project"></span></header>
+<nav aria-label="\u0420\u0430\u0437\u0434\u0435\u043B\u044B"><button type="button" data-view="entries" aria-pressed="true">\u0417\u0430\u043F\u0438\u0441\u0435\u0439<strong id="entries-count">\u2014</strong></button><button type="button" data-view="proposals" aria-pressed="false">\u041D\u0430 \u0440\u0435\u0432\u044C\u044E<strong id="review-count">\u2014</strong></button></nav>
+<p id="status" role="status">\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043A \u043F\u0440\u043E\u0435\u043A\u0442\u0443\u2026</p>
+<input id="search" type="search" aria-label="\u041F\u043E\u0438\u0441\u043A" placeholder="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0437\u0430\u043F\u0438\u0441\u044F\u043C \u0438 \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F\u043C">
+<p id="review-help" hidden>\u0427\u0442\u043E\u0431\u044B \u0440\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F, \u043F\u043E\u043F\u0440\u043E\u0441\u0438\u0442\u0435 \u0432 \u0447\u0430\u0442\u0435: \xAB\u0420\u0430\u0437\u0431\u0435\u0440\u0438 \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F Archivist \u043D\u0430 \u0440\u0435\u0432\u044C\u044E\xBB. ID \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F \u0443\u043A\u0430\u0437\u0430\u043D \u043D\u0430 \u043A\u0430\u0440\u0442\u043E\u0447\u043A\u0435.</p>
+<main id="list" aria-label="\u0417\u0430\u043F\u0438\u0441\u0438 Archivist"></main>
+<script>${script}</script></body></html>`;
+    startPanel = async (io) => {
+      const token = randomBytes(24).toString("hex");
+      const prefix = `/${token}/`;
+      const hash2 = createHash2("sha256").update(script).digest("base64");
+      const server = createServer(async (req, res) => {
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Referrer-Policy", "no-referrer");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'sha256-${hash2}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`);
+        if (req.method !== "GET") {
+          res.writeHead(405).end();
+          return;
+        }
+        if (req.url !== prefix && req.url !== `${prefix}state`) {
+          res.writeHead(404).end();
+          return;
+        }
+        try {
+          if (req.url === prefix) {
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            res.end(panelHtml);
+          } else {
+            const data = await panelSnapshot(io);
+            res.setHeader("Content-Type", "application/json; charset=utf-8");
+            res.end(JSON.stringify(data));
+          }
+        } catch {
+          res.writeHead(503).end();
+        }
+      });
+      await new Promise((resolve2, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          resolve2();
+        });
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Panel did not start");
+      return { server, url: `http://127.0.0.1:${address.port}${prefix}` };
+    };
+  }
+});
+
+// src/cli/main.ts
+var main_exports = {};
+import { execFileSync } from "node:child_process";
+var HELP, MIN_CLAUDE, now, readDocs, printOutcomes, printRender, init, status, report, options, add, change, review, baseline, gc, claudeVersion, doctor, main;
+var init_main = __esm({
+  async "src/cli/main.ts"() {
+    "use strict";
+    init_config();
+    init_io();
+    init_ledger();
+    init_lock();
+    init_render();
+    init_args();
+    init_review();
+    init_types();
+    init_validate();
+    init_signals();
+    init_transcript();
+    init_maintenance();
+    init_memory();
+    init_metrics();
+    init_node_io();
+    init_scan();
+    init_panel();
+    HELP = `archivist \u2014 project knowledge from coding-agent sessions
+
+Usage: archivist <command> [--root <dir>]
+
+  init                  set up .archivist/ and seed exact build/test/lint commands from the project's manifests
+  status                what is recorded: entries by type, proposals waiting for review
+  panel                 open a live local dashboard (prints its URL; keep the process running)
+  report [file]         print the latest task report, or the given one
+  review [--json]       list the proposals waiting for review (--json: with stable ids, for the triage skill)
+  apply <n|id|1,3|all>  record proposals as they are
+  skip <n|id|1,3|all>   drop proposals; the same idea is not proposed again
+  add --type <command|gotcha|decision|procedure> --title <t> --content <c> [--why <reason>] [--paths <glob,glob>] [--evidence <file,file>]
+                        record a fact by hand (decisions need --why)
+  edit <id> [--title <t>] [--content <c>] [--why <reason>] [--paths <glob,glob>|--paths ""]
+                        fix a recorded entry; an empty --paths makes it apply everywhere
+  deprecate <id> --reason <why>
+                        retire an entry: it leaves the rules, the ledger keeps it with the reason
+  recall <words>        the recorded entries that match: ask this before exploring
+  baseline [--before <date>]
+                        measure the project's Claude Code sessions before Archivist (from their transcripts)
+  stats                 recent tasks against the baseline, and how each entry fares
+  health                one look at how Archivist is doing here, and what to do about it
+  gc [--days 60] [--apply]
+                        entries with no sign of use for that long; --apply retires them
+  lint                  near-duplicates, contradictions, stale entries, decisions without a reason, budgets
+  render                regenerate the rule files, index and ADRs from the ledger
+  doctor                check the setup
+  uninstall [--purge]   remove what Archivist generated (rules, skills); --purge also removes .archivist/
+`;
+    MIN_CLAUDE = [2, 1, 290];
+    now = () => (/* @__PURE__ */ new Date()).toISOString();
+    readDocs = async (io) => {
+      const out = [];
+      for (const p of ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "README.md"]) {
+        const t = await io.read(p);
+        if (t) out.push(t);
+      }
+      return out;
+    };
+    printOutcomes = (outcomes) => {
+      for (const o of outcomes) {
+        const what = o.op.op === "add" ? o.op.title : o.title ?? ("id" in o.op ? o.op.id : "");
+        console.log(`  ${o.reason && !o.id ? "\xB7" : o.op.op === "reinforce" ? "\u2191" : "+"} [${o.type ?? "?"}] ${what}${o.reason ? ` (${o.reason})` : ""}`);
+      }
+    };
+    printRender = (r) => {
+      for (const w of r.written) console.log(`  wrote ${w}`);
+      for (const w of r.removed) console.log(`  removed ${w}`);
+    };
+    init = async (io) => withLock(io, async () => {
+      if (!await io.exists(PATHS.config)) await io.write(PATHS.config, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
+      if (!await io.exists(PATHS.gitignore)) await io.write(PATHS.gitignore, ".local/\n");
+      const config = await loadConfig(io);
+      const state = await loadState(io);
+      const v = await validateOps({ ops: await scanCommands(io, config.language), entries: state.entries, io, config, docs: await readDocs(io), now: now(), source: "init" });
+      await appendLedger(io, v.records);
+      console.log(`Archivist set up in ${io.root}`);
+      printOutcomes([...v.applied, ...v.rejected]);
+      if (!v.applied.length) console.log("  no new commands found to record");
+      printRender(await renderAll(io, (await loadState(io)).entries, config));
+      console.log(`Commit .archivist/${io.target === "codex" ? " and .agents/skills/" : " and .claude/rules/archivist/"} to share the knowledge with your team.`);
+    });
+    status = async (io) => {
+      const state = await loadState(io);
+      const active = activeEntries(state.entries);
+      const by = (t) => active.filter((e) => e.type === t).length;
+      const proposals = await listProposals(io);
+      const reports = (await io.list(PATHS.reports)).sort();
+      console.log(`${active.length} active entries: ${by("command")} commands, ${by("gotcha")} gotchas, ${by("decision")} decisions`);
+      console.log(`${state.entries.size - active.length} deprecated`);
+      console.log(`${proposals.length} proposals waiting for review (archivist review)`);
+      console.log(reports.length ? `latest report: ${PATHS.reports}/${reports.at(-1)}` : "no reports yet");
+    };
+    report = async (io, which) => {
+      const reports = (await io.list(PATHS.reports)).sort();
+      const file = which ?? (reports.length ? `${PATHS.reports}/${reports.at(-1)}` : void 0);
+      const text = file ? await io.read(file) : void 0;
+      console.log(text ?? "No report yet: Archivist writes one after a task that taught something.");
+    };
+    options = (args) => parseOptions(args).opts;
+    add = async (io, args) => {
+      const o = options(args);
+      const type = o.type;
+      if (!ENTRY_TYPES.includes(type) || !o.title || !o.content) {
+        console.error("add needs --type command|gotcha|decision, --title and --content");
+        return 2;
+      }
+      if (type === "decision" && !o.why) {
+        console.error("a decision needs --why: the reason, and what was rejected");
+        return 2;
+      }
+      const outcomes = await addEntry(
+        io,
+        await loadConfig(io),
+        { type, title: o.title, content: o.content, ...o.why ? { rationale: o.why } : {}, paths: commaList(o.paths), evidence: commaList(o.evidence) },
+        now()
+      );
+      printOutcomes(outcomes);
+      return outcomes.some((x) => x.id) ? 0 : 1;
+    };
+    change = async (io, verb, args) => {
+      const { words, opts } = parseOptions(args);
+      const id = words[0];
+      if (!id) {
+        console.error(`${verb} needs an entry id (see .archivist/INDEX.md or archivist recall)`);
+        return 2;
+      }
+      const config = await loadConfig(io);
+      const r = verb === "deprecate" ? await deprecateEntry(io, config, id, opts.reason ?? "", now()) : await editEntry(io, config, id, editFromOptions(opts), now());
+      if (!r.ok) {
+        console.error(r.reason);
+        return 1;
+      }
+      console.log(`${verb === "edit" ? "~" : "\u2212"} [${r.entry.type}] ${r.entry.title} \`${r.entry.id}\``);
+      printRender(r);
+      return 0;
+    };
+    review = async (io, verb, which) => {
+      const proposals = await listProposals(io);
+      const chosen = which ? pick(proposals, which) : [];
+      if (!chosen.length) {
+        console.error(`${verb} needs proposal numbers from \`archivist review\` (or all)`);
+        return 2;
+      }
+      if (verb === "skip") console.log(`skipped ${await skipProposals(io, chosen, now())} proposal(s)`);
+      else printOutcomes(await applyProposals(io, await loadConfig(io), chosen, now()));
+      return 0;
+    };
+    baseline = async (io, args) => {
+      const o = options(args);
+      const created = [...(await loadState(io)).entries.values()].map((e) => e.created).sort()[0];
+      const before = new Date(o.before ?? created ?? now());
+      const { sessions, segments } = await readProjectSegments(io.root, before);
+      const metrics = segments.map((s) => toMetrics(computeSignals(s), new Date(s.startedAt).toISOString(), "baseline"));
+      const b = { createdAt: now(), before: before.toISOString(), sessions, summary: summarize(metrics) };
+      await io.write(BASELINE, JSON.stringify(b, null, 2) + "\n");
+      console.log(`Baseline: ${b.summary.tasks} tasks from ${sessions} sessions before ${b.before.slice(0, 10)} (${transcriptDir(io.root)})`);
+      console.log(compareText(void 0, b.summary).replace(/^No baseline yet.*\n\n/, "").replace("now (", "before ("));
+    };
+    gc = async (io, args) => {
+      const o = options(args);
+      const days = Number(o.days ?? 60);
+      const state = await loadState(io);
+      const quiet = await gcCandidates(io, state.entries, days, /* @__PURE__ */ new Date());
+      if (!(await loadConfig(io)).rules.files)
+        console.log("Rule files are off, so no rule load counts as use: unused here means no recorded command was run and no task judged the entry.");
+      if (!quiet.length) {
+        console.log(`Every entry showed a sign of use in the last ${days} days.`);
+        return;
+      }
+      for (const e of quiet) console.log(`  \`${e.id}\` [${e.type}] ${e.title}`);
+      if (!args.includes("--apply")) {
+        console.log(`${quiet.length} entries unused for ${days} days. Run with --apply to retire them (they stay in the ledger).`);
+        return;
+      }
+      const retired = await withLock(io, async () => {
+        const entries = (await loadState(io)).entries;
+        const still = quiet.filter((e) => entries.get(e.id)?.status === "active");
+        await appendLedger(io, gcRecords(still, days, now()));
+        printRender(await renderAll(io, (await loadState(io)).entries, await loadConfig(io)));
+        return still.length;
+      });
+      console.log(`retired ${retired} entries`);
+    };
+    claudeVersion = () => {
+      try {
+        const out = execFileSync("claude", ["--version"], { encoding: "utf8", timeout: 1e4 });
+        const m = out.match(/(\d+)\.(\d+)\.(\d+)/);
+        return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : void 0;
+      } catch {
+        return void 0;
+      }
+    };
+    doctor = async (io) => {
+      let ok = true;
+      const check = (pass, msg, hint) => {
+        console.log(`${pass ? "\u2714" : "\u2718"} ${msg}${!pass && hint ? `
+    ${hint}` : ""}`);
+        ok &&= pass;
+      };
+      const node = Number(process.versions.node.split(".")[0]);
+      check(node >= 20, `Node ${process.versions.node}`, "Archivist's CLI needs Node 20 or newer");
+      const v = io.target === "codex" ? void 0 : claudeVersion();
+      if (v) {
+        const recent = v[0] > MIN_CLAUDE[0] || v[0] === MIN_CLAUDE[0] && (v[1] > MIN_CLAUDE[1] || v[1] === MIN_CLAUDE[1] && v[2] >= MIN_CLAUDE[2]);
+        check(recent, `Claude Code ${v.join(".")}`, `the Archivist mod needs Claude Code ${MIN_CLAUDE.join(".")} or newer`);
+      } else if (io.target !== "codex") console.log("\xB7 claude not on PATH (fine inside the desktop app; the CLI checks are skipped)");
+      check(await io.exists(PATHS.dir), `${PATHS.dir}/ exists`, "run `archivist init`");
+      const configText = await io.read(PATHS.config);
+      let configOk = true;
+      if (configText) {
+        try {
+          JSON.parse(configText);
+        } catch {
+          configOk = false;
+        }
+      }
+      check(configOk, `${PATHS.config} ${configText ? "parses" : "absent (defaults apply)"}`, "fix the JSON or delete the file");
+      const state = await loadState(io);
+      check(!state.badLines.length, `ledger: ${state.entries.size} entries`, `unreadable lines: ${state.badLines.join(", ")}`);
+      const config = await loadConfig(io);
+      const rulesDir = io.target === "codex" ? ".archivist/codex/rules" : PATHS.rulesDir;
+      for (const name of (await io.list(rulesDir)).filter((n) => n.endsWith(".md"))) {
+        const path = `${rulesDir}/${name}`;
+        const text = await io.read(path) ?? "";
+        const lines = text.split("\n").length - 1;
+        const core = name === "core.md";
+        const budget = core ? config.budgets.coreLines : config.budgets.pathFileLines + 6;
+        const chars = core ? config.budgets.coreChars : config.budgets.pathFileChars + 400;
+        check(lines <= budget && text.length <= chars, `${path}: ${lines}/${budget} lines, ${text.length}/${chars} chars`, "run `archivist render`");
+      }
+      const stale = await findStale(io, state.entries);
+      check(!stale.size, `${stale.size} stale entries (cited files are gone)`, `review them in ${PATHS.index}: update or deprecate`);
+      return ok;
+    };
+    main = async () => {
+      const args = process.argv.slice(2);
+      const rootAt = args.indexOf("--root");
+      const start = rootAt >= 0 ? args.splice(rootAt, 2)[1] : process.cwd();
+      const targetAt = args.indexOf("--target");
+      const target2 = targetAt >= 0 ? args.splice(targetAt, 2)[1] : process.env.ARCHIVIST_TARGET ?? "claude";
+      if (target2 !== "claude" && target2 !== "codex") throw new Error("--target must be claude or codex");
+      const [cmd, ...rest] = args;
+      const io = nodeIo(findRoot(start ?? process.cwd()), target2);
+      switch (cmd) {
+        case "panel": {
+          const { url } = await startPanel(io);
+          console.log(url);
+          return 0;
+        }
+        case "init":
+          await init(io);
+          return 0;
+        case "status":
+          await status(io);
+          return 0;
+        case "report":
+          await report(io, rest[0]);
+          return 0;
+        case "review":
+          console.log(rest.includes("--json") ? reviewJson(await listProposals(io)) : reviewText(await listProposals(io)));
+          return 0;
+        case "apply":
+        case "skip":
+          return review(io, cmd, rest.join(","));
+        case "add":
+          return add(io, rest);
+        case "edit":
+        case "deprecate":
+          return change(io, cmd, rest);
+        case "render":
+          printRender(await withLock(io, async () => renderAll(io, (await loadState(io)).entries, await loadConfig(io))));
+          return 0;
+        case "recall":
+          console.log(recallText((await loadState(io)).entries, rest.join(" ")));
+          return 0;
+        case "baseline":
+          if (io.target === "codex") throw new Error("Codex baseline is not available yet");
+          await baseline(io, rest);
+          return 0;
+        case "stats":
+          console.log(await statsText(io, (await loadState(io)).entries));
+          return 0;
+        case "health":
+          console.log(await healthText(io, (await loadState(io)).entries, await loadConfig(io), /* @__PURE__ */ new Date()));
+          return 0;
+        case "gc":
+          await gc(io, rest);
+          return 0;
+        case "lint": {
+          const findings = await lint(io, (await loadState(io)).entries, await loadConfig(io));
+          for (const f of findings) console.log(`${f.level === "warn" ? "\u2718" : "\xB7"} ${f.text}`);
+          if (!findings.length) console.log("\u2714 nothing to report");
+          return findings.some((f) => f.level === "warn") ? 1 : 0;
+        }
+        case "doctor":
+          return await doctor(io) ? 0 : 1;
+        case "uninstall": {
+          const inMemory = (await loadMemoryCaches(io)).filter((m) => Object.keys(m.items).length);
+          const removed = await uninstall(io.root, rest.includes("--purge"), io.target);
+          for (const m of inMemory)
+            console.log(`Entries also live in ${m.store} memory (project ${m.project}): run /archivist memory clear in a Claude Code session to remove them.`);
+          for (const r of removed) console.log(`  removed ${r}`);
+          if (!removed.length) console.log("Nothing generated by Archivist here.");
+          if (!rest.includes("--purge")) console.log(`Kept ${PATHS.dir}/ (the ledger is the knowledge itself): add --purge to remove it too.`);
+          console.log(io.target === "codex" ? "Disable or uninstall Archivist in Codex plugin settings." : "To remove the plugin from Claude Code: /plugin uninstall archivist@archivist");
+          return 0;
+        }
+        case void 0:
+        case "help":
+        case "--help":
+        case "-h":
+          console.log(HELP);
+          return 0;
+        default:
+          console.error(`unknown command: ${cmd}
+
+${HELP}`);
+          return 2;
+      }
+    };
+    process.exitCode = await main();
+  }
+});
+
+// src/adapters/codex/hooks.ts
+init_config();
+init_ledger();
+init_render();
+init_privacy();
+init_node_io();
+init_lock();
+import { createHash } from "node:crypto";
+import { mkdir as mkdir2, open, readdir as readdir2, readFile as readFile2 } from "node:fs/promises";
+import { join as join2 } from "node:path";
+var EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "Interrupt", "SessionEnd"]);
+var hash = (s) => createHash("sha256").update(s).digest("hex").slice(0, 32);
+var capture = (input, excluded, at = (/* @__PURE__ */ new Date()).toISOString()) => {
+  if (typeof input.hook_event_name !== "string" || !EVENTS.has(input.hook_event_name) || typeof input.session_id !== "string") return;
+  const args = input.tool_input && typeof input.tool_input === "object" ? input.tool_input : {};
+  const files = [];
+  if (input.tool_name === "apply_patch" && typeof args.command === "string") {
+    for (const m of args.command.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
+      const path = m[1].trim();
+      if (!path.startsWith("/") && !path.split("/").includes("..") && !isExcluded(path, excluded)) files.push(path);
+    }
+  }
+  return {
+    v: 1,
+    event: input.hook_event_name,
+    session: hash(input.session_id),
+    at,
+    ...typeof input.turn_id === "string" ? { turn: hash(input.turn_id) } : {},
+    ...typeof input.tool_name === "string" ? { tool: input.tool_name.slice(0, 200) } : {},
+    ...typeof input.tool_use_id === "string" ? { call: hash(input.tool_use_id) } : {},
+    fields: Object.keys(input).sort().slice(0, 50),
+    files: [...new Set(files)].slice(0, 100)
+  };
+};
+var handleHook = async (input) => {
+  if (process.env.ARCHIVIST_CHILD || typeof input.cwd !== "string") return {};
+  const io = nodeIo(findRoot(input.cwd), "codex");
+  const config = await loadConfig(io);
+  if (!config.enabled) return {};
+  const event = capture(input, config.privacy.excludePaths);
+  if (!event) return {};
+  await io.write(".archivist/.local/codex/collector.json", JSON.stringify({ v: 1, contentCaptured: false }) + "\n");
+  const dir = join2(io.root, ".archivist/.local/codex/events", event.session);
+  await mkdir2(dir, { recursive: true, mode: 448 });
+  const identity = event.call ? `${event.event}:${event.call}` : event.turn ? `${event.event}:${event.turn}` : `${event.event}:${event.at}`;
+  const file = await open(join2(dir, `${hash(identity)}.json`), "wx", 384).catch((e) => {
+    if (e.code !== "EEXIST") throw e;
+    return void 0;
+  });
+  if (file) {
+    try {
+      await file.writeFile(JSON.stringify(event) + "\n");
+    } finally {
+      await file.close();
+    }
+  }
+  if (event.event === "SessionStart") {
+    const text = await withLock(io, async () => {
+      const state = await loadState(io);
+      const result = await renderAll(io, state.entries, config);
+      return renderCore([...state.entries.values()], config, result.stale);
+    });
+    return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: `${text}
+Scoped knowledge: use the Archivist recall skill before exploring.
+` } };
+  }
+  return {};
+};
+var collectionSummary = async (root) => {
+  const dir = join2(root, ".archivist/.local/codex/events");
+  const sessions = await readdir2(dir).catch(() => []);
+  const counts = {};
+  let total = 0;
+  for (const session of sessions) {
+    if (!/^[a-f0-9]{32}$/.test(session)) continue;
+    for (const file of await readdir2(join2(dir, session))) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const e = JSON.parse(await readFile2(join2(dir, session, file), "utf8"));
+        counts[e.event] = (counts[e.event] ?? 0) + 1;
+        total++;
+      } catch {
+      }
+    }
+  }
+  return JSON.stringify({ sessions: sessions.length, events: total, counts, modelCalls: 0, contentCaptured: false }, null, 2);
+};
+
+// src/adapters/codex/entry.ts
+init_node_io();
+process.env.ARCHIVIST_TARGET = "codex";
+if (process.argv[2] === "hook") {
+  try {
+    let raw = "";
+    for await (const chunk of process.stdin) {
+      raw += chunk;
+      if (Buffer.byteLength(raw) > 4e6) throw new Error("Hook payload exceeds 4 MB");
+    }
+    console.log(JSON.stringify(await handleHook(JSON.parse(raw))));
+  } catch {
+    console.error("Archivist hook failed; collection skipped for this event.");
+    console.log("{}");
+  }
+} else if (process.argv[2] === "collection") {
+  console.log(await collectionSummary(findRoot(process.cwd())));
+} else {
+  await init_main().then(() => main_exports);
+}

@@ -1,0 +1,7 @@
+{
+  "name": "archivist-codex",
+  "version": "1.5.0",
+  "description": "Project knowledge, ADRs and local event collection for Codex",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

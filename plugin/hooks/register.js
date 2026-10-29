@@ -566,7 +566,7 @@ var renderSkill = (e) => {
   const description = oneLine(`${e.title.replace(/[.\s]+$/, "")}.${e.rationale ? ` ${e.rationale}` : ""}`);
   return ["---", `name: ${name}`, `description: ${JSON.stringify(description)}`, "---", GENERATED, `# ${e.title}`, "", e.content.trim(), ""].join("\n");
 };
-var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}) => {
+var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}, target = "claude") => {
   const all = [...entries.values()];
   const views = /* @__PURE__ */ new Map();
   if (config.rules.files) {
@@ -576,6 +576,14 @@ var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {
   }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
+  if (target === "codex") {
+    const mapped = /* @__PURE__ */ new Map();
+    for (const [path, text] of views) {
+      const dest = path.replace(PATHS.rulesDir, ".archivist/codex/rules").replace(PATHS.skillsDir, ".agents/skills");
+      mapped.set(dest, text);
+    }
+    return mapped;
+  }
   return views;
 };
 var findStale = async (io, entries) => {
@@ -602,9 +610,10 @@ var writeViews = async (io, views) => {
 var pruneViews = async (io, views) => {
   if (!io.remove) return [];
   const files = [];
-  for (const dir of [PATHS.rulesDir, PATHS.decisions])
+  for (const dir of [io.target === "codex" ? ".archivist/codex/rules" : PATHS.rulesDir, PATHS.decisions])
     for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
-  const skillDirs = (await io.list(PATHS.skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(PATHS.skillsDir, d));
+  const skillsDir = io.target === "codex" ? ".agents/skills" : PATHS.skillsDir;
+  const skillDirs = (await io.list(skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(skillsDir, d));
   for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
   const removed = [];
   for (const path of files) {
@@ -623,7 +632,7 @@ var pruneViews = async (io, views) => {
 };
 var renderAll = async (io, entries, config) => {
   const stale = await findStale(io, entries);
-  const views = renderViews(entries, config, stale, await loadUsage(io));
+  const views = renderViews(entries, config, stale, await loadUsage(io), io.target);
   return { written: await writeViews(io, views), removed: await pruneViews(io, views), stale };
 };
 

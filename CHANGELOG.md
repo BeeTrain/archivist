@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0 — 2026-10-29
+
+- Добавлен отдельный пакет Archivist для Codex: сохранение и поиск знаний, решения, разбор предложений, подготовка проекта и сбор метаданных событий. Фоновый LLM-анализ пока не включён.
+- Общая база знаний поддерживает отдельные представления для Claude Code и Codex; операции Codex сохраняют файлы Claude Code.
+- Добавлена локальная панель: счётчики активных записей и предложений на ревью, просмотр списков, поиск и обновление каждые три секунды. Навык `panel` открывает её рядом с чатом.
+- Каталог Codex устанавливает опубликованный пакет из GitHub по тегу версии. CI проверяет оба собранных пакета.
+
 ## 1.4.1 — 2026-10-26
 
 - Fix: an OpenViking read answered as `{"result": …}`, the way writes and listings are, was taken as it came, unwrapped. The signature then went unread, so a newer version from another clone could be overwritten, an item already in memory was written again, and `/archivist memory clear` removed nothing.

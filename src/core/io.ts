@@ -2,6 +2,7 @@
 // the CLI on `node:fs`, tests in memory.
 
 export interface Io {
+  target?: "claude" | "codex";
   /** Absolute project root; every path below is relative to it. */
   root: string;
   read(path: string): Promise<string | undefined>;
