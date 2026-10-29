@@ -19,6 +19,10 @@ describe("the plugin options", () => {
     expect(readMemoryOptions({ memory: "something else" })).toEqual(options());
   });
 
+  it("reads a host that passes no options as the defaults", () => {
+    expect(readMemoryOptions(undefined)).toEqual(options());
+  });
+
   it("takes the project list as a list too, and drops repeats whatever their case", () => {
     expect(readMemoryOptions({ memory_cloud_projects: ["github.com/a/b", " GitHub.com/A/B ", "", "github.com/c/*"] }).cloudProjects).toEqual(["github.com/a/b", "github.com/c/*"]);
   });

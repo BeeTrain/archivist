@@ -27,11 +27,11 @@ const projectEntries = (value: unknown): string[] => {
   return entries;
 };
 
-export const readMemoryOptions = (options: Readonly<Record<string, unknown>>): MemoryOptions => ({
-  memory: MEMORY_KINDS.find((kind) => kind === options.memory) ?? "auto",
-  url: textOption(options.memory_url),
-  apiKey: textOption(options.memory_api_key),
-  cloudProjects: projectEntries(options[CLOUD_PROJECTS_OPTION]),
+export const readMemoryOptions = (options: Readonly<Record<string, unknown>> | undefined): MemoryOptions => ({
+  memory: MEMORY_KINDS.find((kind) => kind === options?.memory) ?? "auto",
+  url: textOption(options?.memory_url),
+  apiKey: textOption(options?.memory_api_key),
+  cloudProjects: projectEntries(options?.[CLOUD_PROJECTS_OPTION]),
 });
 
 export const cloudAllowedBy = (project: string, entries: readonly string[]): string | undefined => {

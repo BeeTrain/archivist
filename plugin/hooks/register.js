@@ -1543,10 +1543,10 @@ var projectEntries = (value) => {
   return entries;
 };
 var readMemoryOptions = (options) => ({
-  memory: MEMORY_KINDS.find((kind) => kind === options.memory) ?? "auto",
-  url: textOption(options.memory_url),
-  apiKey: textOption(options.memory_api_key),
-  cloudProjects: projectEntries(options[CLOUD_PROJECTS_OPTION])
+  memory: MEMORY_KINDS.find((kind) => kind === options?.memory) ?? "auto",
+  url: textOption(options?.memory_url),
+  apiKey: textOption(options?.memory_api_key),
+  cloudProjects: projectEntries(options?.[CLOUD_PROJECTS_OPTION])
 });
 var cloudAllowedBy = (project, entries) => {
   const id = project.toLowerCase();
