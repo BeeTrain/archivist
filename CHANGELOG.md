@@ -1,11 +1,38 @@
 # Changelog
 
+## 1.8.0 — 2026-11-06
+
+- Память для Claude Code выбирается в настройках плагина (`/config`): `auto` находит подключённый OpenViking, как раньше, `openviking` ждёт именно его, `mem0` использует адрес и ключ mem0, `off` оставляет записи только в файлах проекта. Настройки личные: каждый в команде выбирает свою память, и в git они не попадают.
+- Добавлен mem0, в облаке и на своём сервере, через REST API. Записи пишутся дословно (`infer: false`) и со скоупом плагинов mem0 для Claude Code, Codex и Cursor, поэтому их recall в облаке находит записи Archivist. Пустой адрес — облако mem0, ключ из настроек или `MEM0_API_KEY`. Любой другой адрес — свой сервер mem0, ключ только из настроек, без ключа запросы идут без авторизации.
+- В облако уходят только проекты из личного списка: `/archivist memory on|off` добавляет или убирает текущий проект, а в проекте вне списка Archivist один раз об этом подсказывает. Облако сверяется не чаще раза в сутки на проект, потому что его чтения тратят квоту. Отказ ключа или исчерпанная квота останавливают прогон, а ответ, который mem0 дал бы снова (другой 4xx, ответ не в JSON, добавление, после которого ничего не сохранено), роняет только свою запись. В обоих случаях синхронизация после ходов ждёт следующей сессии или `/archivist memory sync`. Лишние копии записи, оставшиеся после неудачного удаления, убираются при следующей сверке.
+- `memory.server` убран из `.archivist/config.json`: память выбирается в настройках плагина, а сервер OpenViking находится сам по имени.
+
+## 1.7.0 — 2026-11-05
+
+- Добавлен пакет Archivist для OpenCode 2.2.5: общая база знаний, контекст проекта, команда /archivist и навыки recall, remember, decide и triage.
+- В OpenCode Desktop доступны индикатор 📚, панель записей с поиском, разбор предложений и отчёт последнего анализа. Панель открывается через /archivist-panel.
+- Фоновый анализ OpenCode использует модель сессии без инструментов; результаты поступают на ревью. Очередь сохраняется между запусками, поддерживает отмену устаревших задач, повторы, таймаут и дневные лимиты.
+- Представления знаний Claude Code, Codex и OpenCode работают с общей базой и сохраняют файлы других платформ. Из событий исключаются содержимое файлов и чувствительные пути.
+- README, инструкции установки и CI дополнены поддержкой OpenCode, проверками пакета и интерфейса.
+
+## 1.6.0 — 2026-10-29
+
+- Добавлен включаемый для проекта фоновый анализ Codex: очищенный дайджест задачи передаётся отдельному процессу CLI после паузы. Используется существующая авторизация Codex, отдельный API-ключ не нужен.
+- Все изменения знаний поступают на ревью, включая обновления и подтверждения существующих записей. Новое сообщение отменяет устаревший анализ.
+- Очередь сохраняется между запусками, обработчики используют блокировку. Добавлены таймаут, дневные лимиты и повтор ошибок через 15 минут, максимум три попытки.
+- Панель показывает состояние анализа; команды `analysis enable`, `disable`, `status` и `run` управляют им. По умолчанию анализ выключен.
+- Обновлены навыки setup и collection, документация и проверки фонового анализа.
+
 ## 1.5.0 — 2026-10-29
 
-- The memory is chosen in the plugin options (`/config`): `auto` finds a connected OpenViking as before, `openviking` asks for it, `mem0` uses the mem0 address and key, `off` keeps entries in project files only. The options are personal, so each person on a team picks their own memory, and none of it goes into git.
-- mem0, in the cloud and on an own server, over its REST API: entries are written verbatim (`infer: false`) with the scope the mem0 plugins for Claude Code, Codex and Cursor compute, so their recall in the cloud finds them. An empty address means the mem0 cloud, with the key from the options or `MEM0_API_KEY`; any other address is an own mem0 server, with the key from the options only, or none for a server without auth.
-- The cloud gets only the projects in a personal list: `/archivist memory on|off` adds or removes the current one, and a project not in it gets a one-time hint. The cloud is checked at most once a day per project, since its reads cost quota; a refused key or an exhausted quota stops the run, and any other answer mem0 would give again (another 4xx, an answer that is not JSON, an add that stores nothing) fails only its entry; either way the syncs after each turn wait for the next session or `/archivist memory sync`. Extra copies of an entry, left by a delete that failed, are removed at the next check.
-- `memory.server` is gone from `.archivist/config.json`: the plugin options choose the memory.
+- Добавлен отдельный пакет Archivist для Codex: сохранение и поиск знаний, решения, разбор предложений, подготовка проекта и сбор метаданных событий. Фоновый LLM-анализ пока не включён.
+- Общая база знаний поддерживает отдельные представления для Claude Code и Codex; операции Codex сохраняют файлы Claude Code.
+- Добавлена локальная панель: счётчики активных записей и предложений на ревью, просмотр списков, поиск и обновление каждые три секунды. Навык `panel` открывает её рядом с чатом.
+- Каталог Codex устанавливает опубликованный пакет из GitHub по тегу версии. CI проверяет оба собранных пакета.
+
+## 1.4.1 — 2026-10-26
+
+- Fix: an OpenViking read answered as `{"result": …}`, the way writes and listings are, was taken as it came, unwrapped. The signature then went unread, so a newer version from another clone could be overwritten, an item already in memory was written again, and `/archivist memory clear` removed nothing.
 
 ## 1.4.0 — 2026-10-23
 

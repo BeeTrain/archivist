@@ -1,6 +1,6 @@
 {
   "name": "archivist",
-  "version": "1.5.0",
+  "version": "1.8.0",
   "description": "Captures project knowledge from coding-agent sessions and turns it into docs that save time, tokens and context next time",
   "private": true,
   "type": "module",
@@ -10,14 +10,20 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.mod.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.mod.json && tsc --noEmit -p tsconfig.gui.json",
     "validate": "claude plugin validate plugin",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "validate:codex": "node scripts/validate-codex.mjs",
+    "validate:opencode": "node scripts/validate-opencode.mjs"
   },
   "devDependencies": {
+    "@opencode/plugin": "2.2.5",
     "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
+    "solid-js": "1.9.17",
     "typescript": "^7.0.2",
+    "vite": "7.3.7",
+    "vite-plugin-solid": "2.11.10",
     "vitest": "^5.0.5"
   }
 }

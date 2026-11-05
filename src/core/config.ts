@@ -3,6 +3,18 @@ import type { EntryType } from "./types.js";
 
 export interface Config {
   enabled: boolean;
+  codex: {
+    enabled: boolean;
+    model: string;
+    timeoutSeconds: number;
+    maxCallsPerDay: number;
+  };
+  opencode: {
+    enabled: boolean;
+    model: string;
+    timeoutSeconds: number;
+    maxCallsPerDay: number;
+  };
   /** Language of recorded entries: "auto" follows the user's prompts; otherwise a name such as "Russian" or "English". */
   language: string;
   analyzer: {
@@ -74,6 +86,8 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   enabled: true,
+  codex: { enabled: false, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
+  opencode: { enabled: true, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   language: "auto",
   analyzer: {
     idleSeconds: 90,

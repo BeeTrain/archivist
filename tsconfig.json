@@ -23,6 +23,7 @@
     "scripts"
   ],
   "exclude": [
-    "src/adapters/claude/mod"
+    "src/adapters/claude/mod",
+    "src/adapters/opencode/gui.tsx"
   ]
 }

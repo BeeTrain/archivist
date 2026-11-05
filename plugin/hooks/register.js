@@ -1,4 +1,8 @@
 // src/core/io.ts
+var targetPaths = (target = "claude") => ({
+  rules: target === "claude" ? ".claude/rules/archivist" : `.archivist/${target}/rules`,
+  skills: target === "claude" ? ".claude/skills" : target === "codex" ? ".agents/skills" : ".opencode/skills"
+});
 var PATHS = {
   dir: ".archivist",
   config: ".archivist/config.json",
@@ -41,6 +45,8 @@ var withLocalIgnored = (io) => {
 // src/core/config.ts
 var DEFAULT_CONFIG = {
   enabled: true,
+  codex: { enabled: false, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
+  opencode: { enabled: true, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   language: "auto",
   analyzer: {
     idleSeconds: 90,
@@ -566,7 +572,7 @@ var renderSkill = (e) => {
   const description = oneLine(`${e.title.replace(/[.\s]+$/, "")}.${e.rationale ? ` ${e.rationale}` : ""}`);
   return ["---", `name: ${name}`, `description: ${JSON.stringify(description)}`, "---", GENERATED, `# ${e.title}`, "", e.content.trim(), ""].join("\n");
 };
-var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}) => {
+var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {}, target = "claude") => {
   const all = [...entries.values()];
   const views = /* @__PURE__ */ new Map();
   if (config.rules.files) {
@@ -576,6 +582,14 @@ var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {
   }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
+  if (target !== "claude") {
+    const mapped = /* @__PURE__ */ new Map();
+    for (const [path, text] of views) {
+      const dest = path.replace(PATHS.rulesDir, targetPaths(target).rules).replace(PATHS.skillsDir, targetPaths(target).skills);
+      mapped.set(dest, text);
+    }
+    return mapped;
+  }
   return views;
 };
 var findStale = async (io, entries) => {
@@ -602,9 +616,10 @@ var writeViews = async (io, views) => {
 var pruneViews = async (io, views) => {
   if (!io.remove) return [];
   const files = [];
-  for (const dir of [PATHS.rulesDir, PATHS.decisions])
+  for (const dir of [targetPaths(io.target).rules, PATHS.decisions])
     for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
-  const skillDirs = (await io.list(PATHS.skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(PATHS.skillsDir, d));
+  const skillsDir = targetPaths(io.target).skills;
+  const skillDirs = (await io.list(skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(skillsDir, d));
   for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
   const removed = [];
   for (const path of files) {
@@ -623,7 +638,7 @@ var pruneViews = async (io, views) => {
 };
 var renderAll = async (io, entries, config) => {
   const stale = await findStale(io, entries);
-  const views = renderViews(entries, config, stale, await loadUsage(io));
+  const views = renderViews(entries, config, stale, await loadUsage(io), io.target);
   return { written: await writeViews(io, views), removed: await pruneViews(io, views), stale };
 };
 
@@ -1324,9 +1339,10 @@ var openVikingStore = (call, project) => {
     },
     async fetch(id) {
       const reply = await call("read", { uris: [uriOf(id)] });
-      if (isNotFound(reply.text)) return void 0;
-      if (reply.isError) throw new Error(reply.text.trim());
-      return { ref: uriOf(id), text: reply.text };
+      const text = unwrapped(reply.text);
+      if (isNotFound(text)) return void 0;
+      if (reply.isError) throw new Error(text.trim());
+      return { ref: uriOf(id), text };
     },
     async list() {
       const reply = await call("list", { uri: folder });
@@ -1945,9 +1961,10 @@ var pickCandidates = (entries, seg2, edits, k2 = TOP_K) => {
   return out;
 };
 var alreadyAnalysed = async (io, segment2) => (await loadAnalyses(io)).some((a) => a.segment === segment2) || parseLedger(await io.read(PATHS.ledger) ?? "").records.some((r) => r.src?.segment === segment2) || (await listProposals(io)).some((p) => p.src?.segment === segment2);
-var readDocs = async (io) => {
+var readDocs = async (io, excluded) => {
   const out = [];
   for (const p of DOCS) {
+    if (isExcluded(p, excluded)) continue;
     const t = await io.read(p);
     if (t) out.push(t.slice(0, 5e4));
   }
@@ -2002,13 +2019,18 @@ var analyzeSegment = async (args) => {
   }
   if (!notes) notes = args.messages ? digestFromMessages(sliceTask(args.messages, seg2.prompts[0])) : digestFromSegment(seg2);
   notes = redact(notes).text;
+  if (args.reviewOnly && notes.length > 4e4) notes = `${notes.slice(0, 16e3)}
+\u2026
+${notes.slice(-24e3)}`;
   const c = await llm.complete({ system: CURATE_SYSTEM, prompt: curatePrompt({ notes, notesKind, signals: signalsText(signals), candidates: inPlay, language: config.language }), maxTokens: 2500 });
   const curateUsage = toUsage(c.usage);
   usage = addUsage(usage, curateUsage);
   const reply = c.ok ? parseCuratorReply(c.text) : void 0;
+  if (args.reviewOnly && (!c.ok || !reply)) throw new Error(c.ok ? "Invalid curator reply" : c.reason);
   if (!c.ok) error = [error, `curate: ${c.reason}`].filter(Boolean).join("; ");
   else if (!reply) error = [error, "curate: reply was not JSON"].filter(Boolean).join("; ");
   return withLock(io, async () => {
+    if (args.shouldCommit && !await args.shouldCommit()) return { kind: "skipped", reason: "task changed", usage };
     const state2 = await loadState(io);
     const known = new Set(activeEntries(state2.entries).map((e) => e.id));
     const src = { segment: seg2.id };
@@ -2017,13 +2039,19 @@ var analyzeSegment = async (args) => {
       entries: state2.entries,
       io,
       config,
-      docs: await readDocs(io),
+      docs: await readDocs(io, config.privacy.excludePaths),
       now: ts,
       src,
       skipped: await loadSkipped(io),
       procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => JSON.parse(l).text),
       pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op }))
     });
+    if (args.reviewOnly) {
+      v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? `${io.target ?? "adapter"}: review required` })));
+      v.records.length = 0;
+      v.applied.length = 0;
+      v.promoted.length = 0;
+    }
     for (const p of (await listProposals(io)).filter((p2) => v.promoted.includes(p2.id))) await io.remove?.(p.path);
     await appendLedger(io, v.records);
     if (v.firstSightings.length)

@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { PATHS, joinPath, type Io } from "./io.js";
+import { PATHS, joinPath, targetPaths, type Io, type Target } from "./io.js";
 import { slug } from "./text.js";
 import type { Entry, EntryType } from "./types.js";
 import { loadUsage, type UsageMap } from "./usage.js";
@@ -187,7 +187,7 @@ export const renderSkill = (e: Entry): string => {
 };
 
 /** Every generated file and its content. */
-export const renderViews = (entries: Map<string, Entry>, config: Config, stale = new Set<string>(), usage: UsageMap = {}): Map<string, string> => {
+export const renderViews = (entries: Map<string, Entry>, config: Config, stale = new Set<string>(), usage: UsageMap = {}, target: Target = "claude"): Map<string, string> => {
   const all = [...entries.values()];
   const views = new Map<string, string>();
   if (config.rules.files) {
@@ -197,6 +197,14 @@ export const renderViews = (entries: Map<string, Entry>, config: Config, stale =
   }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
+  if (target !== "claude") {
+    const mapped = new Map<string, string>();
+    for (const [path, text] of views) {
+      const dest = path.replace(PATHS.rulesDir, targetPaths(target).rules).replace(PATHS.skillsDir, targetPaths(target).skills);
+      mapped.set(dest, text);
+    }
+    return mapped;
+  }
   return views;
 };
 
@@ -232,9 +240,10 @@ export const writeViews = async (io: Io, views: Map<string, string>): Promise<st
 export const pruneViews = async (io: Io, views: Map<string, string>): Promise<string[]> => {
   if (!io.remove) return [];
   const files: string[] = [];
-  for (const dir of [PATHS.rulesDir, PATHS.decisions])
+  for (const dir of [targetPaths(io.target).rules, PATHS.decisions])
     for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
-  const skillDirs = (await io.list(PATHS.skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(PATHS.skillsDir, d));
+  const skillsDir = targetPaths(io.target).skills;
+  const skillDirs = (await io.list(skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(skillsDir, d));
   for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
 
   const removed: string[] = [];
@@ -258,6 +267,6 @@ export const pruneViews = async (io: Io, views: Map<string, string>): Promise<st
 /** Stale check, render, write, prune: what every writer of the ledger runs after it. */
 export const renderAll = async (io: Io, entries: Map<string, Entry>, config: Config): Promise<{ written: string[]; removed: string[]; stale: Set<string> }> => {
   const stale = await findStale(io, entries);
-  const views = renderViews(entries, config, stale, await loadUsage(io));
+  const views = renderViews(entries, config, stale, await loadUsage(io), io.target);
   return { written: await writeViews(io, views), removed: await pruneViews(io, views), stale };
 };

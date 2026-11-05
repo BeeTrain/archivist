@@ -47,9 +47,10 @@ export const openVikingStore = (call: McpCall, project: string): MemoryStore => 
     },
     async fetch(id) {
       const reply = await call("read", { uris: [uriOf(id)] });
-      if (isNotFound(reply.text)) return undefined;
-      if (reply.isError) throw new Error(reply.text.trim());
-      return { ref: uriOf(id), text: reply.text };
+      const text = unwrapped(reply.text);
+      if (isNotFound(text)) return undefined;
+      if (reply.isError) throw new Error(text.trim());
+      return { ref: uriOf(id), text };
     },
     async list() {
       const reply = await call("list", { uri: folder });
