@@ -1,4 +1,8 @@
 // src/core/io.ts
+var targetPaths = (target = "claude") => ({
+  rules: target === "claude" ? ".claude/rules/archivist" : `.archivist/${target}/rules`,
+  skills: target === "claude" ? ".claude/skills" : target === "codex" ? ".agents/skills" : ".opencode/skills"
+});
 var PATHS = {
   dir: ".archivist",
   config: ".archivist/config.json",
@@ -42,6 +46,7 @@ var withLocalIgnored = (io) => {
 var DEFAULT_CONFIG = {
   enabled: true,
   codex: { enabled: false, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
+  opencode: { enabled: true, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   language: "auto",
   analyzer: {
     idleSeconds: 90,
@@ -577,10 +582,10 @@ var renderViews = (entries, config, stale = /* @__PURE__ */ new Set(), usage = {
   }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
-  if (target === "codex") {
+  if (target !== "claude") {
     const mapped = /* @__PURE__ */ new Map();
     for (const [path, text] of views) {
-      const dest = path.replace(PATHS.rulesDir, ".archivist/codex/rules").replace(PATHS.skillsDir, ".agents/skills");
+      const dest = path.replace(PATHS.rulesDir, targetPaths(target).rules).replace(PATHS.skillsDir, targetPaths(target).skills);
       mapped.set(dest, text);
     }
     return mapped;
@@ -611,9 +616,9 @@ var writeViews = async (io, views) => {
 var pruneViews = async (io, views) => {
   if (!io.remove) return [];
   const files = [];
-  for (const dir of [io.target === "codex" ? ".archivist/codex/rules" : PATHS.rulesDir, PATHS.decisions])
+  for (const dir of [targetPaths(io.target).rules, PATHS.decisions])
     for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
-  const skillsDir = io.target === "codex" ? ".agents/skills" : PATHS.skillsDir;
+  const skillsDir = targetPaths(io.target).skills;
   const skillDirs = (await io.list(skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(skillsDir, d));
   for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
   const removed = [];
@@ -1669,7 +1674,7 @@ ${notes.slice(-24e3)}`;
       pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op }))
     });
     if (args.reviewOnly) {
-      v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? "Codex: review required" })));
+      v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? `${io.target ?? "adapter"}: review required` })));
       v.records.length = 0;
       v.applied.length = 0;
       v.promoted.length = 0;

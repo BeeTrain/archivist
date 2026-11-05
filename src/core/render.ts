@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { PATHS, joinPath, type Io } from "./io.js";
+import { PATHS, joinPath, targetPaths, type Io, type Target } from "./io.js";
 import { slug } from "./text.js";
 import type { Entry, EntryType } from "./types.js";
 import { loadUsage, type UsageMap } from "./usage.js";
@@ -187,7 +187,7 @@ export const renderSkill = (e: Entry): string => {
 };
 
 /** Every generated file and its content. */
-export const renderViews = (entries: Map<string, Entry>, config: Config, stale = new Set<string>(), usage: UsageMap = {}, target: "claude" | "codex" = "claude"): Map<string, string> => {
+export const renderViews = (entries: Map<string, Entry>, config: Config, stale = new Set<string>(), usage: UsageMap = {}, target: Target = "claude"): Map<string, string> => {
   const all = [...entries.values()];
   const views = new Map<string, string>();
   if (config.rules.files) {
@@ -197,10 +197,10 @@ export const renderViews = (entries: Map<string, Entry>, config: Config, stale =
   }
   views.set(PATHS.index, renderIndex(all, stale));
   for (const e of all) if (e.type === "decision" && e.adr) views.set(adrPath(e), renderAdr(e));
-  if (target === "codex") {
+  if (target !== "claude") {
     const mapped = new Map<string, string>();
     for (const [path, text] of views) {
-      const dest = path.replace(PATHS.rulesDir, ".archivist/codex/rules").replace(PATHS.skillsDir, ".agents/skills");
+      const dest = path.replace(PATHS.rulesDir, targetPaths(target).rules).replace(PATHS.skillsDir, targetPaths(target).skills);
       mapped.set(dest, text);
     }
     return mapped;
@@ -240,9 +240,9 @@ export const writeViews = async (io: Io, views: Map<string, string>): Promise<st
 export const pruneViews = async (io: Io, views: Map<string, string>): Promise<string[]> => {
   if (!io.remove) return [];
   const files: string[] = [];
-  for (const dir of [io.target === "codex" ? ".archivist/codex/rules" : PATHS.rulesDir, PATHS.decisions])
+  for (const dir of [targetPaths(io.target).rules, PATHS.decisions])
     for (const name of await io.list(dir)) if (name.endsWith(".md")) files.push(joinPath(dir, name));
-  const skillsDir = io.target === "codex" ? ".agents/skills" : PATHS.skillsDir;
+  const skillsDir = targetPaths(io.target).skills;
   const skillDirs = (await io.list(skillsDir)).filter((d) => d.startsWith("archivist-")).map((d) => joinPath(skillsDir, d));
   for (const dir of skillDirs) files.push(joinPath(dir, "SKILL.md"));
 

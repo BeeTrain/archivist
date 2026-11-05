@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js"
+  },
+  "include": ["src/adapters/opencode/gui.tsx", "src/adapters/opencode/rpc.ts", "src/adapters/opencode/ui-state.ts", "vite.config.ts"],
+  "exclude": []
+}

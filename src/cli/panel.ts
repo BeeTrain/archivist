@@ -5,6 +5,7 @@ import type { Io } from "../core/io.js";
 import { activeEntries, loadState } from "../core/ledger.js";
 import { describeOp, listProposals } from "../core/review.js";
 import { analysisStatus } from "../adapters/codex/queue.js";
+import { analysisSnapshot as opencodeAnalysis } from "../adapters/opencode/queue.js";
 
 export const panelSnapshot = async (io: Io) => {
   const [state, proposals] = await Promise.all([loadState(io), listProposals(io)]);
@@ -14,7 +15,7 @@ export const panelSnapshot = async (io: Io) => {
     entries,
     proposals: proposals.map((p) => ({ id: p.id, text: describeOp(p.op), reason: p.reason })),
     counts: { entries: entries.length, review: proposals.length },
-    analysis: await analysisStatus(io),
+    analysis: await (io.target === "opencode" ? opencodeAnalysis(io) : analysisStatus(io)),
     updatedAt: new Date().toISOString(),
   };
 };

@@ -3,6 +3,7 @@
 //   plugin/bin/archivist     — the Node CLI (on the Bash tool's PATH while the plugin is enabled)
 import { build } from "esbuild";
 import { chmodSync } from "node:fs";
+import { build as buildGui } from "vite";
 
 await build({
   entryPoints: ["src/adapters/claude/mod/register.ts"],
@@ -41,3 +42,30 @@ await build({
   banner: { js: "#!/usr/bin/env node" },
 });
 chmodSync("plugin-codex/bin/archivist", 0o755);
+
+await build({
+  entryPoints: ["src/adapters/opencode/index.ts"],
+  outfile: "plugin-opencode/index.js",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node20",
+  minify: true,
+  external: ["effect", "effect/*"],
+  legalComments: "none",
+});
+
+await build({
+  entryPoints: ["src/adapters/opencode/cli.ts"],
+  outfile: "plugin-opencode/bin/archivist",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node20",
+  minify: true,
+  legalComments: "none",
+  banner: { js: "#!/usr/bin/env node" },
+});
+chmodSync("plugin-opencode/bin/archivist", 0o755);
+console.log("built plugin-codex/bin/archivist, plugin-opencode/index.js, plugin-opencode/bin/archivist");
+await buildGui();

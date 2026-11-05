@@ -1,0 +1,10 @@
+{
+  "name": "archivist-ui",
+  "version": "1.7.0",
+  "type": "module",
+  "description": "Индикатор и панель Архивиста для OpenCode Desktop 2.2.5",
+  "exports": {
+    "./gui-experimental": "./gui-experimental.cjs"
+  },
+  "files": ["gui-experimental.cjs"]
+}

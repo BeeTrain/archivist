@@ -163,7 +163,7 @@ export const analyzeSegment = async (args: {
       pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op })),
     });
     if (args.reviewOnly) {
-      v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? "Codex: review required" })));
+      v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? `${io.target ?? "adapter"}: review required` })));
       v.records.length = 0;
       v.applied.length = 0;
       v.promoted.length = 0;

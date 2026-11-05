@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { nodeIo } from "../../cli/node-io.js";
 import { loadConfig, type Config } from "../../core/config.js";
 import { withLock } from "../../core/lock.js";
-import { redact, isExcluded } from "../../core/privacy.js";
+import { safeText } from "../../core/capture.js";
+export { safeText } from "../../core/capture.js";
 import { emptyUsage, weightedTokens, type Segment, type ToolEvent } from "../../core/types.js";
 import { analyzeSegment } from "../../analyzer/pipeline.js";
 import { computeSignals, isTrivial } from "../../analyzer/signals.js";
@@ -33,15 +34,6 @@ const atomic = async (io: Io, path: string, value: unknown) => {
   const tmp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   await io.write(tmp, JSON.stringify(value) + "\n");
   await rename(join(io.root, tmp), join(io.root, path));
-};
-
-export const safeText = (value: unknown, excluded: string[], root: string, max = 6000): string => {
-  if (typeof value !== "string") return "";
-  const lines = value.slice(0, 60000).split("\n").filter((line) => !line.split(/[\s\x60"'<>()[\]{},;=]+/).some((word) => {
-    const path = word.replace(root + "/", "").replace(/^\.\//, "").replace(/[:.!?]+$/, "");
-    return path && isExcluded(path, excluded);
-  }));
-  return redact(lines.join("\n")).text.slice(0, max);
 };
 
 export const taskTool = (input: Record<string, unknown>, config: Config, root: string): ToolEvent[] => {
