@@ -24,7 +24,7 @@ npm run validate:opencode
 
 Затем открой проект в OpenCode и вызови `/archivist init`, `/archivist status`. Плагин добавляет инструмент `archivist` и навыки `archivist-recall`, `archivist-remember`, `archivist-decide`, `archivist-triage`. Результат slash-команды добавляется в очередь сессии без запуска модели; агент получает его при следующем продолжении. Через инструмент результат возвращается сразу.
 
-Для всех проектов тот же путь можно добавить в `~/.config/opencode/opencode.jsonc`. Пакет пока не опубликован в npm. V1 не поддерживается.
+Для всех проектов тот же путь можно добавить в `~/.config/opencode/opencode.jsonc`. V1 не поддерживается.
 
 ## Интерфейс OpenCode Desktop
 
