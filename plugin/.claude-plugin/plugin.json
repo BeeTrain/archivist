@@ -1,7 +1,7 @@
 {
   "name": "archivist",
   "displayName": "Archivist",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Learns from each task: records commands, pitfalls and decisions as project docs that save time, tokens and context in later sessions",
   "author": {
     "name": "BeeTrain",
@@ -16,5 +16,32 @@
     "adr",
     "context",
     "tokens"
-  ]
+  ],
+  "userConfig": {
+    "memory": {
+      "type": "string",
+      "title": "External memory",
+      "description": "Where Archivist also keeps its entries: auto uses OpenViking when its plugin is connected, openviking expects it and says when it is missing, mem0 uses the address and key below, off keeps them in project files only.",
+      "options": ["auto", "openviking", "mem0", "off"],
+      "default": "auto"
+    },
+    "memory_url": {
+      "type": "string",
+      "title": "mem0 address",
+      "description": "Empty for the mem0 cloud. For your own mem0 server, its base URL, such as http://localhost:8888.",
+      "default": ""
+    },
+    "memory_api_key": {
+      "type": "string",
+      "title": "mem0 API key",
+      "description": "For the mem0 cloud, MEM0_API_KEY is used when this is empty. For your own server, the key it printed at setup; empty if it runs without auth.",
+      "sensitive": true
+    },
+    "memory_cloud_projects": {
+      "type": "string",
+      "title": "Projects sent to cloud memory",
+      "description": "Comma-separated project ids as /archivist memory shows them, owner prefixes such as github.com/owner/*, or * for all. /archivist memory on adds the current project.",
+      "default": ""
+    }
+  }
 }

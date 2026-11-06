@@ -1,6 +1,6 @@
 {
   "name": "archivist-opencode",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Общая память проекта, сбор контекста и фоновый анализ задач для OpenCode 2.2.5",
   "type": "module",
   "exports": {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appendLedger } from "../src/core/ledger.js";
-import { clearMemory, loadMemoryCache, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
+import { clearMemory, loadMemoryCache, memoryCachePath, memoryOutcomeText, memoryPaused, MemoryRefused, MemoryRejected, memoryUpToDate, projectId, readSignature, reconcile, renderItem, syncMemory, type MemoryCache } from "../src/core/memory.js";
 import type { Entry } from "../src/core/types.js";
 import { entry, fakeMemoryStore, memoryIo } from "./helpers.js";
 
@@ -178,6 +178,84 @@ describe("reconcile", () => {
     const second = await sync(fake, ledger(gotcha, command), first.cache);
     expect(second.outcome.written).toEqual(["gk-1"]);
   });
+
+  it("takes the text from a listing that carries it and reads no item one by one", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    const { outcome } = await sync(fake, ledger(gotcha, command), emptyCache(), new Set(), true);
+    expect(outcome.adopted).toEqual(["gk-1"]);
+    expect(outcome.written).toEqual(["cmd-1"]);
+    expect(fake.calls).toEqual(["list", "put cmd-1"]);
+  });
+
+  it("hands the store the entry's signature with the text", async () => {
+    const fake = fakeMemoryStore(project);
+    await sync(fake, ledger(gotcha));
+    expect(fake.signatures).toEqual([{ project, id: "gk-1", updated: ts }]);
+  });
+
+  it("notes when memory listed as many items as it gives at once", async () => {
+    const fake = fakeMemoryStore(project, {}, { cut: true });
+    const { cache } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(cache.listCut).toBe(true);
+  });
+
+  it("keeps the copy that matches the ledger and removes the other copies", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    fake.items.set(`${fake.refOf("gk-1")}#3`, renderItem({ ...gotcha, content: "An older wording", updated: "2026-10-22T10:00:00.000Z" }, project));
+    const { cache, outcome } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(outcome.duplicates).toEqual(["gk-1", "gk-1"]);
+    expect([...fake.items.keys()]).toEqual([fake.refOf("gk-1")]);
+    expect(cache.items["gk-1"]?.ref).toBe(fake.refOf("gk-1"));
+    expect(memoryOutcomeText(outcome)).toContain("2 duplicates removed");
+  });
+
+  it("keeps the newest copy when none matches the ledger", async () => {
+    const newer = renderItem({ ...gotcha, content: "Ahead in another clone", updated: later }, project);
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem({ ...gotcha, content: "Old", updated: "2026-10-22T10:00:00.000Z" }, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, newer);
+    const { outcome } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(outcome.duplicates).toEqual(["gk-1"]);
+    expect(outcome.newer).toEqual(["gk-1"]);
+    expect([...fake.items.values()]).toEqual([newer]);
+  });
+
+  it("removes every copy of a retired entry", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    const { outcome } = await sync(fake, ledger({ ...gotcha, status: "deprecated", updated: later }), emptyCache(), new Set(), true);
+    expect(outcome.removed).toEqual(["gk-1"]);
+    expect(fake.items.size).toBe(0);
+  });
+
+  it("leaves copies alone when the listing has no text to choose by", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    const { outcome } = await sync(fake, ledger(gotcha), emptyCache(), new Set(), true);
+    expect(outcome.duplicates).toEqual([]);
+    expect(fake.items.size).toBe(2);
+  });
+
+  it("forgets the ref it sent when that copy was the duplicate it removed", async () => {
+    const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
+    fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));
+    const sentThere: MemoryCache = { ...emptyCache(), items: { "gk-1": { ref: `${fake.refOf("gk-1")}#2`, text: renderItem(gotcha, project), updated: ts } } };
+    const { cache, outcome } = await sync(fake, ledger(gotcha), sentThere, new Set(), true);
+    expect(outcome.duplicates).toEqual(["gk-1"]);
+    expect(cache.items["gk-1"]?.ref).toBe(fake.refOf("gk-1"));
+  });
+
+  it("stops at a refusal, keeps what it sent before it, and says why", async () => {
+    const fake = fakeMemoryStore(project);
+    fake.refusePut.add("cmd-1");
+    const procedure = entry({ id: "proc-1", type: "procedure", title: "Release", content: "1. npm run check", created: ts, updated: ts });
+    const { cache, outcome } = await sync(fake, ledger(gotcha, command, procedure));
+    expect(outcome.written).toEqual(["gk-1"]);
+    expect(outcome.refused).toBe("mem0 refused the request (HTTP 401): Invalid API key");
+    expect(fake.calls).not.toContain("fetch proc-1");
+    expect(cache.items["gk-1"]).toBeDefined();
+    expect(memoryOutcomeText(outcome)).toContain("stopped: mem0 refused the request (HTTP 401)");
+  });
 });
 
 describe("syncMemory", () => {
@@ -220,14 +298,118 @@ describe("syncMemory", () => {
   it("knows memory is up to date until the ledger changes or a sync failed", async () => {
     const io = await withLedger(gotcha);
     const fake = fakeMemoryStore(project);
-    expect(await memoryUpToDate(io)).toBe(false);
+    expect(await memoryUpToDate(io, "fake")).toBe(false);
     await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
-    expect(await memoryUpToDate(io)).toBe(true);
+    expect(await memoryUpToDate(io, "fake")).toBe(true);
     await appendLedger(io, [{ v: 1, ts: later, op: "add", entry: command }]);
-    expect(await memoryUpToDate(io)).toBe(false);
+    expect(await memoryUpToDate(io, "fake")).toBe(false);
     fake.failPut.add("cmd-1");
     await syncMemory({ io, store: fake.store, project, mode: "fast", now: later });
-    expect(await memoryUpToDate(io)).toBe(false);
+    expect(await memoryUpToDate(io, "fake")).toBe(false);
+  });
+
+  it("checks memory at every session start when reading it is free", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: later });
+    expect(fake.calls).toContain("list");
+  });
+
+  it("checks memory whose reads cost quota at most once a day, unless asked by hand", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project, {}, { readsCostQuota: true });
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T10:00:00.000Z" });
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T20:00:00.000Z" });
+    expect(fake.calls).toEqual([]);
+    await syncMemory({ io, store: fake.store, project, mode: "full", now: "2026-10-23T21:00:00.000Z" });
+    expect(fake.calls).toContain("list");
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-24T22:00:00.000Z" });
+    expect(fake.calls).toContain("list");
+  });
+
+  it("pauses after a refusal until the next session start or a sync by hand", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.refusePut.add("gk-1");
+    expect((await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts }))?.refused).toBeDefined();
+    fake.calls.length = 0;
+    await appendLedger(io, [{ v: 1, ts: later, op: "add", entry: command }]);
+    expect(await syncMemory({ io, store: fake.store, project, mode: "fast", now: later })).toBeUndefined();
+    expect(fake.calls).toEqual([]);
+    fake.refusePut.clear();
+    expect((await syncMemory({ io, store: fake.store, project, mode: "start", now: later }))?.written.sort()).toEqual(["cmd-1", "gk-1"]);
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBeUndefined();
+  });
+
+  it("sends the other entries when memory turns one down, then waits for the next session", async () => {
+    const io = await withLedger(gotcha, command);
+    const fake = fakeMemoryStore(project);
+    fake.rejectPut.add("gk-1");
+    const first = await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    expect(first?.written).toEqual(["cmd-1"]);
+    expect(first?.rejected).toBe("mem0 rejected the request (HTTP 400): BYOK required");
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBe("mem0 rejected the request (HTTP 400): BYOK required");
+    fake.calls.length = 0;
+    const procedure = entry({ id: "proc-1", type: "procedure", title: "Release", content: "1. npm run check", created: later, updated: later });
+    await appendLedger(io, [{ v: 1, ts: later, op: "add", entry: procedure }]);
+    expect(await syncMemory({ io, store: fake.store, project, mode: "fast", now: later })).toBeUndefined();
+    expect(fake.calls).toEqual([]);
+    fake.rejectPut.clear();
+    expect((await syncMemory({ io, store: fake.store, project, mode: "start", now: later }))?.written.sort()).toEqual(["gk-1", "proc-1"]);
+  });
+
+  it("stops at a refusal while listing and waits for the next session", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.listErrors.push(new MemoryRefused("mem0 refused the request (HTTP 429): quota"));
+    const outcome = await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    expect(outcome?.refused).toBe("mem0 refused the request (HTTP 429): quota");
+    expect(fake.calls).toEqual(["list"]);
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBe("mem0 refused the request (HTTP 429): quota");
+  });
+
+  it("stops and waits for the next session when memory turns down its listing", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.listErrors.push(new MemoryRejected("mem0 rejected the request (HTTP 400): bad filter"));
+    const outcome = await syncMemory({ io, store: fake.store, project, mode: "start", now: ts });
+    expect(outcome?.refused).toBe("mem0 rejected the request (HTTP 400): bad filter");
+    expect(fake.calls).toEqual(["list"]);
+    expect((await loadMemoryCache(io, "fake", project)).paused).toBe("mem0 rejected the request (HTTP 400): bad filter");
+  });
+
+  it("tells that the store in use is paused, so a fast sync has nothing to do", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project);
+    fake.refusePut.add("gk-1");
+    expect(await memoryPaused(io, "fake")).toBe(false);
+    await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
+    expect(await memoryPaused(io, "fake")).toBe(true);
+    expect(await memoryPaused(io, "other")).toBe(false);
+  });
+
+  it("does not count a refused run as the day's check of memory", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project, {}, { readsCostQuota: true });
+    fake.refusePut.add("gk-1");
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T10:00:00.000Z" });
+    fake.refusePut.clear();
+    fake.calls.length = 0;
+    await syncMemory({ io, store: fake.store, project, mode: "start", now: "2026-10-23T11:00:00.000Z" });
+    expect(fake.calls).toContain("list");
+  });
+
+  it("tells whether memory is up to date from the store in use only", async () => {
+    const io = await withLedger(gotcha);
+    io.files.set(memoryCachePath("old"), JSON.stringify({ store: "old", project, items: {}, ledgerMark: "stale" }));
+    const fake = fakeMemoryStore(project);
+    await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
+    expect(await memoryUpToDate(io, "fake")).toBe(true);
+    expect(await memoryUpToDate(io, "old")).toBe(false);
   });
 
   it("clears this project's Archivist items, leaves what a person put there, and forgets what it sent", async () => {
@@ -238,6 +420,15 @@ describe("syncMemory", () => {
     expect(await clearMemory(io, fake.store, project)).toEqual(["gk-1"]);
     expect([...fake.items.keys()]).toEqual([fake.refOf("notes")]);
     expect((await loadMemoryCache(io, "fake", project)).items).toEqual({});
+  });
+
+  it("clears from the listing alone when it carries the text", async () => {
+    const io = await withLedger(gotcha);
+    const fake = fakeMemoryStore(project, {}, { listsText: true });
+    await syncMemory({ io, store: fake.store, project, mode: "fast", now: ts });
+    fake.calls.length = 0;
+    expect(await clearMemory(io, fake.store, project)).toEqual(["gk-1"]);
+    expect(fake.calls).toEqual(["list", `remove ${fake.refOf("gk-1")}`]);
   });
 
   it("starts a fresh cache when the project is no longer the one it was written for", async () => {

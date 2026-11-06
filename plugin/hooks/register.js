@@ -61,7 +61,7 @@ var DEFAULT_CONFIG = {
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6e3, pathFileLines: 40, pathFileChars: 3e3, maxContentChars: 400 },
   rules: { decisions: "compact", files: true },
-  memory: { enabled: true, server: "auto", project: "auto" },
+  memory: { enabled: true, project: "auto" },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15e3 },
   review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 }
@@ -956,6 +956,10 @@ var expireProposals = async (io, config, now) => {
 };
 
 // src/core/memory.ts
+var MemoryRefused = class extends Error {
+};
+var MemoryRejected = class extends Error {
+};
 var segment = (s) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 var localProject = (path) => `local/${segment(path.replace(/\.git$/, "").split("/").filter(Boolean).at(-1) ?? "project") || "project"}`;
 var hostAndPath = (remote) => {
@@ -994,31 +998,55 @@ var readSignature = (text) => {
   const match = (text.trimEnd().split("\n").at(-1) ?? "").match(SIGNATURE);
   return match ? { project: match[1], id: match[2], updated: match[3] } : void 0;
 };
-var noOutcome = () => ({ written: [], adopted: [], removed: [], newer: [], missing: [], unknown: [], failed: [] });
+var noOutcome = () => ({ written: [], adopted: [], removed: [], duplicates: [], newer: [], missing: [], unknown: [], failed: [] });
+var copiesById = (listing) => {
+  const copies = /* @__PURE__ */ new Map();
+  for (const item of listing.items) copies.set(item.id, [...copies.get(item.id) ?? [], item]);
+  return copies;
+};
+var keeperOf = (copies, text) => copies.find((c) => c.text.trimEnd() === text.trimEnd()) ?? copies.reduce((a, b) => (readSignature(b.text)?.updated ?? "") > (readSignature(a.text)?.updated ?? "") ? b : a);
 var messageOf = (err) => err instanceof Error ? err.message : String(err);
 var reconcile = async (args) => {
   const { store, entries, stale, cache, verify } = args;
   const items = { ...cache.items };
   const outcome = noOutcome();
-  const present = verify && store.list ? new Map((await store.list()).map((item) => [item.id, item.ref])) : void 0;
+  let listing;
+  try {
+    listing = verify && store.list ? await store.list() : void 0;
+  } catch (err) {
+    if (err instanceof MemoryRefused || err instanceof MemoryRejected) return { cache, outcome: { ...outcome, refused: err.message } };
+    throw err;
+  }
+  const present = listing ? copiesById(listing) : void 0;
+  const known = Boolean(store.listsText && listing && !listing.cut);
   for (const e of entries.values()) {
-    const sent = items[e.id];
+    const copies = present?.get(e.id) ?? [];
     try {
       if (e.status !== "active") {
-        const ref2 = sent?.ref ?? present?.get(e.id);
-        if (!ref2) continue;
-        await store.remove(ref2);
+        const refs = new Set([items[e.id]?.ref, ...copies.map((c) => c.ref)].filter((ref2) => Boolean(ref2)));
+        if (!refs.size) continue;
+        for (const ref2 of refs) await store.remove(ref2);
         delete items[e.id];
         outcome.removed.push(e.id);
         continue;
       }
       if (stale.has(e.id)) continue;
       const text = renderItem(e, cache.project);
+      let listed = copies[0];
+      if (copies.length > 1 && copies.every((c) => c.text !== void 0)) {
+        listed = keeperOf(copies, text);
+        for (const copy of copies.filter((c) => c !== listed)) {
+          await store.remove(copy.ref);
+          outcome.duplicates.push(e.id);
+          if (items[e.id]?.ref === copy.ref) delete items[e.id];
+        }
+      }
+      const sent = items[e.id];
       if (sent?.text === text) {
         if (present && !present.has(e.id)) outcome.missing.push(e.id);
         continue;
       }
-      const remote = await store.fetch?.(e.id);
+      const remote = listed?.text !== void 0 ? { ref: listed.ref, text: listed.text } : known ? void 0 : await store.fetch?.(e.id, sent?.ref ?? listed?.ref);
       const remoteUpdated = remote ? readSignature(remote.text)?.updated : void 0;
       if (remoteUpdated && remoteUpdated > e.updated) {
         outcome.newer.push(e.id);
@@ -1029,23 +1057,29 @@ var reconcile = async (args) => {
         outcome.adopted.push(e.id);
         continue;
       }
-      const ref = await store.put(e.id, text, sent?.ref ?? remote?.ref);
+      const ref = await store.put(e.id, text, sent?.ref ?? remote?.ref, { project: cache.project, id: e.id, updated: e.updated });
       items[e.id] = { ref, text, updated: e.updated };
       outcome.written.push(e.id);
     } catch (err) {
+      if (err instanceof MemoryRefused) {
+        outcome.refused = err.message;
+        break;
+      }
+      if (err instanceof MemoryRejected) outcome.rejected ??= err.message;
       outcome.failed.push({ id: e.id, error: messageOf(err) });
     }
   }
   if (present) {
     for (const id of present.keys()) if (!entries.has(id)) outcome.unknown.push(id);
   }
-  return { cache: { ...cache, items, ...present ? { missing: outcome.missing, unknown: outcome.unknown } : {} }, outcome };
+  return { cache: { ...cache, items, ...listing ? { missing: outcome.missing, unknown: outcome.unknown, listCut: listing.cut } : {} }, outcome };
 };
 var memoryOutcomeText = (outcome) => {
   const counts = [
     [outcome.written.length, "written"],
     [outcome.adopted.length, "already there"],
     [outcome.removed.length, "removed"],
+    [outcome.duplicates.length, "duplicates removed"],
     [outcome.newer.length, "newer in memory"],
     [outcome.missing.length, "gone from memory"],
     [outcome.unknown.length, "unknown to this ledger"],
@@ -1053,7 +1087,8 @@ var memoryOutcomeText = (outcome) => {
   ];
   const said = counts.filter(([n]) => n).map(([n, what]) => `${n} ${what}`);
   const firstFailure = outcome.failed[0];
-  return said.length ? `${said.join(", ")}${firstFailure ? ` (${firstFailure.id}: ${firstFailure.error})` : ""}` : "nothing to do";
+  const text = said.length ? `${said.join(", ")}${firstFailure ? ` (${firstFailure.id}: ${firstFailure.error})` : ""}` : "nothing to do";
+  return outcome.refused ? `${text}; stopped: ${outcome.refused}` : text;
 };
 var memoryCachePath = (store) => `.archivist/.local/memory-${store}.json`;
 var loadMemoryCache = async (io, store, project) => {
@@ -1080,16 +1115,17 @@ var loadMemoryCaches = async (io) => {
   return caches;
 };
 var ledgerMark = (text) => `${text.length}:${text.slice(-64)}`;
-var memoryUpToDate = async (io) => {
-  const caches = await loadMemoryCaches(io);
+var memoryPaused = async (io, store) => Boolean((await loadMemoryCaches(io)).find((c) => c.store === store)?.paused);
+var memoryUpToDate = async (io, store) => {
+  const cache = (await loadMemoryCaches(io)).find((c) => c.store === store);
   const mark2 = ledgerMark(await io.read(PATHS.ledger) ?? "");
-  return caches.length > 0 && caches.every((cache) => cache.ledgerMark === mark2 && !cache.lastError);
+  return cache !== void 0 && cache.ledgerMark === mark2 && !cache.lastError;
 };
 var clearMemory = async (io, store, project) => {
   const removed = [];
-  for (const item of await store.list?.() ?? []) {
-    const remote = await store.fetch?.(item.id);
-    if (!remote || readSignature(remote.text)?.project !== project) continue;
+  for (const item of (await store.list?.())?.items ?? []) {
+    const text = item.text ?? (await store.fetch?.(item.id, item.ref))?.text;
+    if (text === void 0 || readSignature(text)?.project !== project) continue;
     await store.remove(item.ref);
     removed.push(item.id);
   }
@@ -1097,17 +1133,33 @@ var clearMemory = async (io, store, project) => {
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(forgotten, null, 1) + "\n"));
   return removed;
 };
+var VERIFY_INTERVAL_MS = 864e5;
+var verifies = (mode, cache, store, now) => {
+  if (mode === "full" || !cache.lastSync) return true;
+  if (mode === "fast") return false;
+  const verifiedRecently = cache.lastVerify !== void 0 && Date.parse(now) - Date.parse(cache.lastVerify) < VERIFY_INTERVAL_MS;
+  return !store.readsCostQuota || !verifiedRecently;
+};
 var syncMemory = async (args) => {
   const { io, store, project, mode, now } = args;
   const ledgerText = await io.read(PATHS.ledger) ?? "";
   const mark2 = ledgerMark(ledgerText);
   const cache = await loadMemoryCache(io, store.name, project);
-  const firstSync = !cache.lastSync;
-  if (mode === "fast" && !firstSync && cache.ledgerMark === mark2 && !cache.lastError) return void 0;
+  if (mode === "fast" && cache.paused) return void 0;
+  const verify = verifies(mode, cache, store, now);
+  if (!verify && cache.ledgerMark === mark2 && !cache.lastError) return void 0;
   const entries = foldLedger(parseLedger(ledgerText).records);
-  const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify: mode === "verify" || firstSync });
+  const { cache: next, outcome } = await reconcile({ store, entries, stale: await findStale(io, entries), cache, verify });
   const failure = outcome.failed[0];
-  const saved = { ...next, ledgerMark: mark2, lastSync: now, lastError: failure ? `${failure.id}: ${failure.error}` : void 0 };
+  const paused = outcome.refused ?? outcome.rejected;
+  const saved = {
+    ...next,
+    ledgerMark: mark2,
+    lastSync: now,
+    ...verify && !paused ? { lastVerify: now } : {},
+    lastError: outcome.refused ?? (failure ? `${failure.id}: ${failure.error}` : void 0),
+    paused
+  };
   await withLock(io, () => io.write(memoryCachePath(store.name), JSON.stringify(saved, null, 1) + "\n"));
   return outcome;
 };
@@ -1178,12 +1230,15 @@ var lint = async (io, entries, config) => {
   return out;
 };
 var WEEK = 7 * 864e5;
-var memoryLines = (memories) => memories.flatMap((m) => [
+var inUse = (m, store) => store === void 0 || m.store === store;
+var memoryInUseLines = (m) => [
   `- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries in memory${m.lastSync ? `, last sync ${m.lastSync.slice(0, 16).replace("T", " ")}` : ""}`,
   ...m.missing?.length ? [`- ${m.missing.length} gone from memory: not put back until the entry changes`] : [],
   ...m.unknown?.length ? [`- ${m.unknown.length} in memory that this ledger does not know: from another branch or clone`] : [],
-  ...m.lastError ? [`- last error: ${m.lastError}`] : []
-]);
+  ...m.listCut ? ["- memory listed as many items as it gives at once: the counts above may be short"] : [],
+  ...m.paused ? [`- paused until the next session or /archivist memory sync: ${m.paused}`] : m.lastError ? [`- last error: ${m.lastError}`] : []
+];
+var memoryLines = (memories, store) => memories.flatMap((m) => inUse(m, store) ? memoryInUseLines(m) : [`- ${m.store}, project ${m.project}: ${Object.keys(m.items).length} entries sent earlier; not in use now, so not synced`]);
 var healthText = async (io, entries, config, now, extras = {}) => {
   const since = new Date(now.getTime() - WEEK).toISOString();
   const active = activeEntries(entries);
@@ -1230,12 +1285,12 @@ var healthText = async (io, entries, config, now, extras = {}) => {
     ...wrong.length ? [`- judged wrong more often than helpful: ${wrong.map((e) => `\`${e.id}\``).join(", ")}`] : []
   ];
   const memories = await loadMemoryCaches(io);
-  if (memories.length) lines.push("", "## Memory", ...memoryLines(memories));
+  if (memories.length || extras.memoryNote) lines.push("", "## Memory", ...extras.memoryNote ? [`- ${extras.memoryNote}`] : [], ...memoryLines(memories, extras.memoryInUse));
   if (warnings.length) lines.push("", "## Lint", ...warnings.slice(0, 10).map((w) => `- ${w.text}`), ...warnings.length > 10 ? [`- and ${warnings.length - 10} more: archivist lint`] : []);
   const todo = [];
   if (human || queue.length >= 5) todo.push(`/archivist:triage: ${queue.length} proposals${human ? `, ${human} of them need your yes or no` : ""}`);
   if (failed || errors) todo.push("/archivist log: some analyses failed; send the log if it keeps happening");
-  if (memories.some((m) => m.lastError)) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
+  if (memories.some((m) => m.lastError && inUse(m, extras.memoryInUse))) todo.push("/archivist memory sync: the last sync to memory failed, /archivist memory shows why");
   if (!config.rules.files && !memories.some((m) => Object.keys(m.items).length))
     todo.push("rule files are off and no memory has received the entries: no agent sees them (connect a memory plugin, or set rules.files to true)");
   if (stale.size) todo.push(`${stale.size} stale entries: /archivist edit or /archivist deprecate (see ${PATHS.index})`);
@@ -1291,10 +1346,328 @@ var openVikingStore = (call, project) => {
     },
     async list() {
       const reply = await call("list", { uri: folder });
-      if (isNotFound(reply.text)) return [];
-      return textOrThrow(reply).split("\n").map((line) => line.match(/^\[file\] ([^./][^/]*)\.md$/)?.[1]).filter((id) => Boolean(id)).map((id) => ({ id, ref: uriOf(id) }));
+      if (isNotFound(reply.text)) return { items: [] };
+      const items = textOrThrow(reply).split("\n").map((line) => line.match(/^\[file\] ([^./][^/]*)\.md$/)?.[1]).filter((id) => Boolean(id)).map((id) => ({ id, ref: uriOf(id) }));
+      return { items };
     }
   };
+};
+
+// src/core/mem0-scope.ts
+var normalizeRemote = (remote) => {
+  let r = remote.trim();
+  if (r.startsWith("git@") && r.includes(":")) r = `https://${r.slice(4).replace(":", "/")}`;
+  if (r.endsWith(".git")) r = r.slice(0, -4);
+  const url = r.match(/^([^:/?#]+):\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/);
+  if (url) {
+    const [, scheme, netloc, path, query = "", fragment = ""] = url;
+    const [, host = "", port] = netloc.slice(netloc.lastIndexOf("@") + 1).match(/^(.*?)(?::(\d+))?$/);
+    const hostname = host.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+    r = `${scheme.toLowerCase()}://${hostname}${Number(port) ? `:${Number(port)}` : ""}${path}${query.length > 1 ? query : ""}${fragment.length > 1 ? fragment : ""}`;
+  }
+  return r.replace(/\/+$/, "");
+};
+var scopeValue = (raw) => {
+  const value = (raw ?? "").trim();
+  return /^\*+$/.test(value) ? "" : value;
+};
+var appIdOf = (rawRemote, identity, root2, configured) => {
+  const fixed = scopeValue(configured);
+  if (fixed) return fixed;
+  let remote = (rawRemote || (identity.startsWith("local:") ? "" : identity)).trim();
+  if (remote.endsWith(".git")) remote = remote.slice(0, -4);
+  const prefix = ["https://", "http://", "ssh://", "git://"].find((p) => remote.startsWith(p));
+  remote = prefix ? remote.slice(prefix.length) : remote.replace(/^git@/, "");
+  const parts = remote.replace(":", "/").split("/").filter(Boolean);
+  const name = parts.length >= 2 ? `${parts.at(-2)}-${parts.at(-1)}` : parts.at(-1);
+  return name ? name.replaceAll("/", "-").replaceAll(":", "-") : root2.split("/").filter(Boolean).at(-1) || "unknown";
+};
+var hash10 = async (text) => {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 10);
+};
+var mem0Scope = async (args) => {
+  const rawRemote = args.rawRemote ?? "";
+  const root2 = args.topLevel?.trim() || args.root;
+  const identity = normalizeRemote(rawRemote) || `local:${root2}`;
+  const appId = appIdOf(rawRemote, identity, root2, args.projectIdEnv);
+  const agentId = identity.startsWith("local:") ? `local-${appId}-${await hash10(root2)}` : `${appId}-${await hash10(identity)}`;
+  const userId = args.userIdCandidates.map(scopeValue).find(Boolean) ?? "default";
+  return { appId, agentId, userId };
+};
+
+// src/core/memory-lane.ts
+var BY_STRENGTH = ["fast", "start", "full"];
+var stronger = (a, b) => BY_STRENGTH.indexOf(a) >= BY_STRENGTH.indexOf(b) ? a : b;
+var memoryLane = () => {
+  let tail = Promise.resolve();
+  let waiting;
+  const inTurn = (work) => {
+    const turn = tail.then(work, work);
+    tail = turn.catch(() => void 0);
+    return turn;
+  };
+  return {
+    sync(mode, run) {
+      if (waiting) {
+        waiting = stronger(waiting, mode);
+        return Promise.resolve();
+      }
+      waiting = mode;
+      return inTurn(() => {
+        const chosen = waiting ?? mode;
+        waiting = void 0;
+        return run(chosen);
+      });
+    },
+    byHand: inTurn
+  };
+};
+
+// src/core/memory-mem0.ts
+var MEM0_CLOUD_URL = "https://api.mem0.ai";
+var isMem0Cloud = (address) => {
+  if (!address.trim()) return true;
+  try {
+    const host = new URL(address.trim()).hostname;
+    return host === "mem0.ai" || host.endsWith(".mem0.ai");
+  } catch {
+    return false;
+  }
+};
+var hostAndPath2 = (address) => {
+  try {
+    const url = new URL(address);
+    return `${url.host}${url.pathname}`;
+  } catch {
+    return address;
+  }
+};
+var slug2 = (text) => text.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+var mem0StoreName = (address) => isMem0Cloud(address) ? "mem0" : `mem0-${slug2(hostAndPath2(address.trim()))}`;
+var mem0Transport = (fetcher, base, auth) => {
+  const root2 = base.trim().replace(/\/+$/, "");
+  const masked = (text) => auth?.secret ? text.replaceAll(auth.secret, "***") : text;
+  return async (method, path, body) => {
+    const headers = { "Content-Type": "application/json", ...auth ? { [auth.header]: auth.value } : {} };
+    try {
+      const reply = await fetcher(`${root2}${path}`, { method, headers, ...body === void 0 ? {} : { body: JSON.stringify(body) } });
+      return { status: reply.status, text: masked(reply.text) };
+    } catch (err) {
+      throw new Error(`mem0 at ${root2} is unreachable: ${masked(err instanceof Error ? err.message : String(err))}`);
+    }
+  };
+};
+var REFUSED_STATUSES = /* @__PURE__ */ new Set([401, 402, 403, 429]);
+var saidIn = (text) => {
+  try {
+    const body = JSON.parse(text);
+    const said = body?.detail ?? body?.message ?? body?.error;
+    return said === void 0 ? text : typeof said === "string" ? said : JSON.stringify(said);
+  } catch {
+    return text;
+  }
+};
+var reasonIn = (text) => saidIn(text).replace(/\s+/g, " ").trim().slice(0, 200);
+var succeeded = (reply) => {
+  if (reply.status >= 200 && reply.status < 300) return reply;
+  if (REFUSED_STATUSES.has(reply.status)) throw new MemoryRefused(`mem0 refused the request (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
+  if (reply.status >= 400 && reply.status < 500) throw new MemoryRejected(`mem0 rejected the request (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
+  throw new Error(`mem0 request failed (HTTP ${reply.status}): ${reasonIn(reply.text)}`);
+};
+var answerOf = (reply) => {
+  const text = succeeded(reply).text;
+  try {
+    return JSON.parse(text || "null") ?? void 0;
+  } catch {
+    throw new MemoryRejected(`mem0 answered with something that is not JSON (HTTP ${reply.status}): ${reasonIn(text)}`);
+  }
+};
+var itemsOf = (memories) => memories.flatMap((m) => {
+  const id = m.metadata?.archivist_id;
+  return m.id && typeof id === "string" ? [{ ref: m.id, id, ...typeof m.memory === "string" ? { text: m.memory } : {} }] : [];
+});
+var newestOf = (copies) => {
+  const updated = (c) => c.text === void 0 ? "" : readSignature(c.text)?.updated ?? "";
+  const newest = copies.filter((c) => c.text !== void 0).reduce((a, b) => !a || updated(b) > updated(a) ? b : a, void 0);
+  return newest ? { ref: newest.ref, text: newest.text } : void 0;
+};
+var metadataOf = (signature) => ({
+  archivist_key: `archivist/${signature.project}/${signature.id}`,
+  archivist_project: signature.project,
+  archivist_id: signature.id,
+  archivist_updated: signature.updated
+});
+var addedId = (reply) => {
+  const added = answerOf(reply)?.results?.[0]?.id;
+  if (!added) throw new MemoryRejected("mem0 stored nothing");
+  return added;
+};
+var removeAt = async (http, path) => {
+  const reply = await http("DELETE", path);
+  if (reply.status !== 404) succeeded(reply);
+};
+var LIST_FIELDS = ["id", "memory", "metadata", "updated_at"];
+var mem0CloudStore = (http, scope, project) => {
+  const listWhere = async (metadata) => {
+    const items = [];
+    for (let page = 1; ; page++) {
+      const answer = answerOf(
+        await http("POST", `/v3/memories/?page=${page}&page_size=200`, { filters: { AND: [{ app_id: scope.appId }, { metadata }] }, fields: LIST_FIELDS })
+      );
+      const results = answer?.results ?? [];
+      items.push(...itemsOf(results));
+      if (!answer?.next || !results.length) return items;
+    }
+  };
+  const remove = (ref) => removeAt(http, `/v1/memories/${encodeURIComponent(ref)}/`);
+  return {
+    name: "mem0",
+    readsCostQuota: true,
+    listsText: true,
+    async put(_id, text, ref, signature) {
+      const added = addedId(
+        await http("POST", "/v3/memories/add/", {
+          messages: [{ role: "user", content: text }],
+          infer: false,
+          immutable: true,
+          app_id: scope.appId,
+          agent_id: scope.agentId,
+          user_id: scope.userId,
+          metadata: metadataOf(signature)
+        })
+      );
+      if (ref && ref !== added) {
+        try {
+          await remove(ref);
+        } catch (err) {
+          if (err instanceof MemoryRefused) throw err;
+        }
+      }
+      return added;
+    },
+    remove,
+    fetch: async (id) => newestOf(await listWhere({ archivist_key: `archivist/${project}/${id}` })),
+    list: async () => ({ items: await listWhere({ archivist_project: project }) })
+  };
+};
+var SERVER_LIST_LIMIT = 1e3;
+var mem0ServerStore = (http, scope, project, name) => {
+  const add = async (text, signature) => addedId(await http("POST", "/memories", { messages: [{ role: "user", content: text }], infer: false, agent_id: scope.agentId, user_id: scope.userId, metadata: metadataOf(signature) }));
+  const listNow = async () => {
+    const answer = answerOf(await http("GET", `/memories?agent_id=${encodeURIComponent(scope.agentId)}&top_k=${SERVER_LIST_LIMIT}`));
+    const rows = Array.isArray(answer) ? answer : answer?.results ?? [];
+    return { items: itemsOf(rows.filter((row) => row.metadata?.archivist_project === project)), cut: rows.length >= SERVER_LIST_LIMIT };
+  };
+  let lastListing;
+  const list = () => lastListing = listNow();
+  return {
+    name,
+    readsCostQuota: false,
+    listsText: true,
+    async put(_id, text, ref, signature) {
+      if (!ref) return add(text, signature);
+      const reply = await http("PUT", `/memories/${encodeURIComponent(ref)}`, { text, metadata: metadataOf(signature) });
+      if (reply.status === 404) return add(text, signature);
+      succeeded(reply);
+      return ref;
+    },
+    remove: (ref) => removeAt(http, `/memories/${encodeURIComponent(ref)}`),
+    async fetch(id, ref) {
+      if (ref) {
+        const reply = await http("GET", `/memories/${encodeURIComponent(ref)}`);
+        const found = reply.status === 404 ? void 0 : answerOf(reply);
+        if (found?.metadata?.archivist_key === `archivist/${project}/${id}` && typeof found.memory === "string") return { ref: found.id ?? ref, text: found.memory };
+      }
+      return newestOf((await (lastListing ?? list())).items.filter((item) => item.id === id));
+    },
+    list
+  };
+};
+
+// src/core/memory-choice.ts
+var CLOUD_PROJECTS_OPTION = "memory_cloud_projects";
+var MEMORY_KINDS = ["auto", "openviking", "mem0", "off"];
+var textOption = (value) => typeof value === "string" ? value.trim() : "";
+var sameProject = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+var projectEntries = (value) => {
+  const entries = [];
+  for (const raw of Array.isArray(value) ? value : [value]) {
+    if (typeof raw !== "string") continue;
+    for (const entry of raw.split(/[\s,]+/)) if (entry && !entries.some((known) => sameProject(known, entry))) entries.push(entry);
+  }
+  return entries;
+};
+var readMemoryOptions = (options) => ({
+  memory: MEMORY_KINDS.find((kind) => kind === options?.memory) ?? "auto",
+  url: textOption(options?.memory_url),
+  apiKey: textOption(options?.memory_api_key),
+  cloudProjects: projectEntries(options?.[CLOUD_PROJECTS_OPTION])
+});
+var cloudAllowedBy = (project, entries) => {
+  const id = project.toLowerCase();
+  return entries.find((entry) => {
+    const allowed = entry.trim().toLowerCase();
+    return allowed === "*" || allowed === id || allowed.endsWith("/*") && id.startsWith(allowed.slice(0, -1));
+  });
+};
+var withCloudProject = (entries, project) => entries.some((entry) => sameProject(entry, project)) ? [...entries] : [...entries, project];
+var withoutCloudProject = (entries, project) => entries.filter((entry) => !sameProject(entry, project));
+var parsedUrl = (address) => {
+  try {
+    return new URL(address);
+  } catch {
+    return void 0;
+  }
+};
+var addressProblem = (address) => {
+  const url = parsedUrl(address);
+  if (!url || url.protocol !== "http:" && url.protocol !== "https:") return "The mem0 address in /config is not an http:// or https:// URL, such as http://localhost:8888.";
+  if (url.username || url.password) return "The mem0 address in /config has a user name or password in it: put the key under mem0 API key instead.";
+  return void 0;
+};
+var chooseMemory = (args) => {
+  const { options, project, envKey, openVikingServer: openVikingServer2 } = args;
+  if (options.memory === "off") return { kind: "none", why: "External memory is off in the plugin options (/config): entries stay in project files." };
+  if (options.memory !== "mem0") {
+    if (openVikingServer2) return { kind: "openviking", server: openVikingServer2 };
+    return {
+      kind: "none",
+      why: options.memory === "openviking" ? "OpenViking is chosen in /config, but it is not connected to this session." : "No OpenViking is connected to this session; to use mem0, choose it under External memory in /config."
+    };
+  }
+  const problem = options.url ? addressProblem(options.url) : void 0;
+  if (problem) return { kind: "none", why: problem };
+  const cloud = isMem0Cloud(options.url);
+  const key = options.apiKey || (cloud ? envKey?.trim() || void 0 : void 0);
+  if (cloud && !key) return { kind: "none", why: "mem0 cloud is chosen, but it has no key: set the mem0 API key in /config, or MEM0_API_KEY in the environment." };
+  return { kind: "mem0", base: options.url || MEM0_CLOUD_URL, cloud, key, allowed: !cloud || cloudAllowedBy(project, options.cloudProjects) !== void 0 };
+};
+var memoryWhere = (choice) => {
+  if (choice.kind === "openviking") return choice.server;
+  if (choice.kind === "mem0") return choice.cloud ? "mem0 cloud" : `mem0 at ${choice.base}`;
+  return "";
+};
+var placeMemory = async (options, lookup) => {
+  const openVikingServer2 = options.memory === "auto" || options.memory === "openviking" ? await lookup.openVikingServer() : void 0;
+  const envKey = options.memory === "mem0" && isMem0Cloud(options.url) ? await lookup.cloudKey() : void 0;
+  const choose = (project2) => chooseMemory({ options, project: project2, envKey, openVikingServer: openVikingServer2 });
+  const unplaced = choose("");
+  if (unplaced.kind === "none") return { choice: unplaced, project: "", where: "" };
+  const project = await lookup.project();
+  const choice = choose(project);
+  return { choice, project, where: memoryWhere(choice) };
+};
+var storeNameFor = (options) => {
+  if (options.memory === "off") return void 0;
+  return options.memory === "mem0" ? mem0StoreName(options.url) : "openviking";
+};
+var memorySyncBlock = (config, choice, project) => {
+  if (!config.enabled) return "Archivist is off in this project: enabled is false in .archivist/config.json.";
+  if (!config.memory.enabled) return "Memory sync is off: set memory.enabled to true in .archivist/config.json.";
+  if (choice.kind === "none") return choice.why;
+  if (choice.kind === "mem0" && !choice.allowed) return `mem0 cloud is chosen, but ${project} is not sent there: /archivist memory on sends it.`;
+  return void 0;
 };
 
 // src/core/log.ts
@@ -1763,11 +2136,11 @@ var holdOf = (spent, limits, analyzer, now) => {
 var SEG_KEY = "archivist:seg:";
 var BUDGET_KEY = "archivist:budget:";
 var LAST_KEY = "archivist:last:";
+var CLOUD_HINT_KEY = "archivist:cloud-hint:";
 var RETRY_MS = 15 * 6e4;
 var BUSY_RETRY_MS = 6e4;
 var FORK_TIMEOUT_MS = 12e4;
 var MEMORY_CHECK_AFTER_START_MS = 5e3;
-var NO_MEMORY = "No supported memory plugin is connected to this session (Archivist supports OpenViking).";
 var segKey = (s) => `${SEG_KEY}${s.session}:${s.id}`;
 var toUsage2 = (u) => ({
   input: u?.input_tokens ?? 0,
@@ -1795,8 +2168,8 @@ var ownTurnPending = false;
 var lastStatus;
 var statusKind;
 var ownTurns = /* @__PURE__ */ new Set();
-var memoryBusy = false;
-var memoryAgain;
+var memoryOptions = readMemoryOptions({});
+var memoryTurns = memoryLane();
 var newSegment = () => ({
   id: Date.now().toString(36),
   session,
@@ -1905,67 +2278,142 @@ function mcpCaller($, server) {
     return { text: blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n"), isError: Boolean(reply.isError) };
   };
 }
-async function memoryServer($, config) {
-  if (config.memory.server !== "auto") return config.memory.server;
+async function openVikingServer($) {
   const usage = await $.session.usage({ breakdown: "summary" });
   return findOpenVikingServer(usage.context?.breakdown?.mcpTools ?? []);
 }
-async function gitRemote($, base) {
-  const run = await $.process.run(["git", "-C", base, "remote", "get-url", "origin"]);
+async function gitOutput($, base, args) {
+  const run = await $.process.run(["git", "-C", base, ...args]);
   return run.exitCode === 0 ? String(run.stdout ?? "").trim() || void 0 : void 0;
 }
-async function memoryTarget($, base, config) {
-  const server = await memoryServer($, config);
-  if (!server) return void 0;
-  const project = config.memory.project !== "auto" ? config.memory.project : projectId(await gitRemote($, base), base);
-  return { server, project, store: openVikingStore(mcpCaller($, server), project) };
+async function optionRow($, key) {
+  return (await $.config.list()).find((row) => key.test(row.key));
+}
+async function mem0UserIds($) {
+  const option = (await optionRow($, /^mem0(@.*)?\.user_id$/))?.value;
+  return [
+    typeof option === "string" ? option : void 0,
+    await $.env.get("MEM0_CODE_USER_ID"),
+    await $.env.get("MEM0_USER_ID"),
+    await $.env.get("MEM0_RESOLVED_USER_ID"),
+    await $.env.get("USER"),
+    await $.env.get("USERNAME")
+  ];
+}
+function mem0Fetcher($) {
+  return async (url, init) => {
+    const reply = await $.http.fetch(url, init);
+    return { status: reply.status, text: String(reply.text ?? "") };
+  };
+}
+async function mem0Store($, base, choice, project) {
+  const scope = await mem0Scope({
+    rawRemote: await gitOutput($, base, ["config", "--get", "remote.origin.url"]),
+    root: base,
+    topLevel: await gitOutput($, base, ["rev-parse", "--show-toplevel"]),
+    projectIdEnv: await $.env.get("MEM0_PROJECT_ID"),
+    userIdCandidates: await mem0UserIds($)
+  });
+  const auth = !choice.key ? void 0 : choice.cloud ? { header: "Authorization", value: `Token ${choice.key}`, secret: choice.key } : { header: "X-API-Key", value: choice.key, secret: choice.key };
+  const http = mem0Transport(mem0Fetcher($), choice.base, auth);
+  return choice.cloud ? mem0CloudStore(http, scope, project) : mem0ServerStore(http, scope, project, mem0StoreName(choice.base));
+}
+async function memoryProject($, base, config) {
+  return config.memory.project !== "auto" ? config.memory.project : projectId(await gitOutput($, base, ["remote", "get-url", "origin"]), base);
+}
+async function memoryPlace($, base, config) {
+  return placeMemory(memoryOptions, {
+    openVikingServer: () => openVikingServer($),
+    cloudKey: () => $.env.get("MEM0_API_KEY"),
+    project: () => memoryProject($, base, config)
+  });
+}
+async function memoryStore($, base, place) {
+  const { choice, project } = place;
+  if (choice.kind === "openviking") return openVikingStore(mcpCaller($, choice.server), project);
+  if (choice.kind === "mem0") return mem0Store($, base, choice, project);
+  return void 0;
+}
+async function hintCloudOnce($, base, project, text) {
+  const key = CLOUD_HINT_KEY + project;
+  if (await $.store.get(key)) return;
+  await $.store.set(key, true);
+  $.ui.toast(text, { timeoutMs: cfg.report.toastMs });
+  await log($, base, `memory: ${text}`);
 }
 async function syncToMemory($, base, mode) {
-  if (memoryBusy) {
-    memoryAgain = mode === "verify" || memoryAgain === "verify" ? "verify" : "fast";
-    return;
-  }
-  memoryBusy = true;
   try {
     const io = makeIo($, base);
     const config = await loadConfig(io);
-    if (!config.enabled || !config.memory.enabled) return;
-    if (mode === "fast" && await memoryUpToDate(io)) return;
-    const target = await memoryTarget($, base, config);
-    if (!target) return;
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode, now: (/* @__PURE__ */ new Date()).toISOString() });
-    if (outcome) await log($, base, `memory ${mode} (${target.server}, ${target.project}): ${memoryOutcomeText(outcome)}`);
+    const name = storeNameFor(memoryOptions);
+    if (!config.enabled || !config.memory.enabled || !name) return;
+    if (mode === "fast" && (await memoryUpToDate(io, name) || await memoryPaused(io, name))) return;
+    const place = await memoryPlace($, base, config);
+    const block = memorySyncBlock(config, place.choice, place.project);
+    if (block) {
+      if (mode === "start" && place.choice.kind === "mem0" && !place.choice.allowed) await hintCloudOnce($, base, place.project, block);
+      return;
+    }
+    const store = await memoryStore($, base, place);
+    if (!store) return;
+    const outcome = await syncMemory({ io, store, project: place.project, mode, now: (/* @__PURE__ */ new Date()).toISOString() });
+    if (outcome) await log($, base, `memory ${mode} (${place.where}, ${place.project}): ${memoryOutcomeText(outcome)}`);
   } catch (err) {
     await log($, base, `memory ${mode}: failed: ${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    memoryBusy = false;
-    const again = memoryAgain;
-    memoryAgain = void 0;
-    if (again) await syncToMemory($, base, again);
   }
 }
 function syncToMemoryLater($, base, mode, delayMs = 0) {
-  $.clock.after(delayMs, async () => syncToMemory($, base, mode));
+  $.clock.after(delayMs, async () => memoryTurns.sync(mode, (chosen) => syncToMemory($, base, chosen)));
+}
+var stillSentBy = (project, entry) => `${project} goes to cloud memory because of ${entry} in /config (Archivist \u203A Projects sent to cloud memory): change it there.`;
+async function cloudProjectsCommand($, project, action) {
+  const row = await optionRow($, /^archivist(@.*)?\.memory_cloud_projects$/);
+  if (!row) return "The plugin options are not available in this session: set them in /config.";
+  const entries = readMemoryOptions({ [CLOUD_PROJECTS_OPTION]: row.value }).cloudProjects;
+  const next = action === "on" ? withCloudProject(entries, project) : withoutCloudProject(entries, project);
+  const sentBy = cloudAllowedBy(project, action === "on" ? entries : next);
+  if (action === "on" && sentBy) return `${project} already goes to cloud memory (${sentBy} in /config).`;
+  if (action === "off" && next.length === entries.length) return sentBy ? stillSentBy(project, sentBy) : `${project} is not sent to cloud memory.`;
+  const { deny } = await $.config.set({ key: row.key, value: next.join(", ") });
+  if (deny) return `Not changed: ${deny}`;
+  if (action === "on") return `Added ${project} to the projects sent to cloud memory; its entries go there after the plugin reloads.`;
+  return sentBy ? stillSentBy(project, sentBy) : `${project} no longer goes to cloud memory. What it sent stays there: /archivist memory clear removes it.`;
 }
 async function memoryCommand($, io, config, action) {
-  const target = await memoryTarget($, root, config);
-  const where = target ? `${target.server}, project ${target.project}` : "";
-  const syncOn = config.enabled && config.memory.enabled;
-  if (action === "sync") {
-    if (!syncOn) return "Memory sync is off: set memory.enabled to true in .archivist/config.json.";
-    if (!target) return NO_MEMORY;
-    const outcome = await syncMemory({ io, store: target.store, project: target.project, mode: "verify", now: (/* @__PURE__ */ new Date()).toISOString() });
-    return `Synced with ${where}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
+  try {
+    if (action === "on" || action === "off") return await cloudProjectsCommand($, await memoryProject($, root, config), action);
+    const place = await memoryPlace($, root, config);
+    const block = memorySyncBlock(config, place.choice, place.project);
+    const at = `${place.where}, project ${place.project}`;
+    if (action === "sync") {
+      const store = block ? void 0 : await memoryStore($, root, place);
+      if (!store) return block ?? at;
+      const outcome = await memoryTurns.byHand(() => syncMemory({ io, store, project: place.project, mode: "full", now: (/* @__PURE__ */ new Date()).toISOString() }));
+      return `Synced with ${at}: ${outcome ? memoryOutcomeText(outcome) : "nothing to do"}.`;
+    }
+    if (action === "clear") {
+      const store = await memoryStore($, root, place);
+      if (!store) return block ?? at;
+      const removed = await memoryTurns.byHand(() => clearMemory(io, store, place.project));
+      return [
+        `Removed ${removed.length} Archivist items from ${at}.`,
+        ...block ? [] : ["Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out."]
+      ].join(" ");
+    }
+    const head2 = place.choice.kind === "none" ? place.choice.why : `Memory: ${at}`;
+    return [head2, ...block && block !== head2 ? [block] : [], ...memoryLines(await loadMemoryCaches(io), storeNameFor(memoryOptions) ?? null)].join("\n");
+  } catch (err) {
+    return `Memory: ${err instanceof Error ? err.message : String(err)}`;
   }
-  if (action === "clear") {
-    if (!target) return NO_MEMORY;
-    const removed = await clearMemory(io, target.store, target.project);
-    return [
-      `Removed ${removed.length} Archivist items from ${where}.`,
-      ...syncOn ? ["Memory sync is still on, so they come back at the next sync: set memory.enabled to false in .archivist/config.json to keep them out."] : []
-    ].join(" ");
+}
+async function memoryNote($, config) {
+  try {
+    const place = await memoryPlace($, root, config);
+    if (memoryOptions.memory === "auto" && place.choice.kind === "none") return void 0;
+    return memorySyncBlock(config, place.choice, place.project);
+  } catch {
+    return void 0;
   }
-  return [target ? `Memory: ${where}${syncOn ? "" : " (sync is off: memory.enabled)"}` : NO_MEMORY, ...memoryLines(await loadMemoryCaches(io))].join("\n");
 }
 async function analyse($, stored, current) {
   const s = stored.seg;
@@ -2048,7 +2496,8 @@ ${err.stack ?? ""}` : String(err);
     analysing = false;
   }
 }
-function register(on) {
+function register(on, options) {
+  memoryOptions = readMemoryOptions(options);
   on("session.start", async ($, e, next) => {
     root = await $.session.root();
     session = await $.session.id();
@@ -2056,7 +2505,7 @@ function register(on) {
     await $.command.register({
       name: "archivist",
       description: "Archivist: what it learned from the last task (report) or the knowledge base status (status)",
-      argumentHint: "[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|memory [status|sync|clear]|log]"
+      argumentHint: "[report|status|health|stats|recall <words>|review|apply <n>|skip <n>|edit <id> \u2026|deprecate <id> --reason \u2026|memory [status|sync|clear|on|off]|log]"
     });
     const waiting = /* @__PURE__ */ new Map();
     for (const key of await $.store.keys()) {
@@ -2077,7 +2526,7 @@ function register(on) {
       });
     }
     await refreshStatus($, makeIo($, root));
-    syncToMemoryLater($, root, "verify", MEMORY_CHECK_AFTER_START_MS);
+    syncToMemoryLater($, root, "start", MEMORY_CHECK_AFTER_START_MS);
     return next(e);
   }).catch(($, e, next) => next(e));
   on("session.attach", async ($, e, next) => {
@@ -2179,7 +2628,9 @@ function register(on) {
       return {
         text: await healthText(io, (await loadState(io)).entries, cfg, /* @__PURE__ */ new Date(), {
           log: await $.store.get(logKey(root)) ?? [],
-          spentToday: await $.store.get(BUDGET_KEY + today()) ?? 0
+          spentToday: await $.store.get(BUDGET_KEY + today()) ?? 0,
+          memoryNote: await memoryNote($, cfg),
+          memoryInUse: storeNameFor(memoryOptions) ?? null
         })
       };
     if (verb === "recall") return { text: recallText((await loadState(io)).entries, rest.join(" ")) };

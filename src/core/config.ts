@@ -65,7 +65,6 @@ export interface Config {
   };
   memory: {
     enabled: boolean;
-    server: string;
     project: string;
   };
   privacy: {
@@ -103,7 +102,7 @@ export const DEFAULT_CONFIG: Config = {
   apply: { autoConfidence: 0.8, autoTypes: ["command", "gotcha", "decision"] },
   budgets: { coreLines: 60, coreChars: 6000, pathFileLines: 40, pathFileChars: 3000, maxContentChars: 400 },
   rules: { decisions: "compact", files: true },
-  memory: { enabled: true, server: "auto", project: "auto" },
+  memory: { enabled: true, project: "auto" },
   privacy: { excludePaths: [".env*", "**/.env*", "**/secrets/**", "**/*.pem", "**/*.key", "**/id_rsa*"] },
   report: { mode: "quiet", toastMs: 15_000 },
   review: { promoteOnRepeat: true, expireDays: 14, expireTasks: 20 },
