@@ -1004,7 +1004,11 @@ var copiesById = (listing) => {
   for (const item of listing.items) copies.set(item.id, [...copies.get(item.id) ?? [], item]);
   return copies;
 };
-var keeperOf = (copies, text) => copies.find((c) => c.text.trimEnd() === text.trimEnd()) ?? copies.reduce((a, b) => (readSignature(b.text)?.updated ?? "") > (readSignature(a.text)?.updated ?? "") ? b : a);
+var keeperOf = (copies, text) => {
+  const updated = (copy) => readSignature(copy.text)?.updated ?? "";
+  const newest = copies.reduce((a, b) => updated(b) > updated(a) ? b : a);
+  return copies.find((copy) => updated(copy) === updated(newest) && copy.text.trimEnd() === text.trimEnd()) ?? newest;
+};
 var messageOf = (err) => err instanceof Error ? err.message : String(err);
 var reconcile = async (args) => {
   const { store, entries, stale, cache, verify } = args;

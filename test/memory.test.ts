@@ -220,6 +220,21 @@ describe("reconcile", () => {
     expect([...fake.items.values()]).toEqual([newer]);
   });
 
+  it.each([false, true])("keeps a newer copy even when another matches the ledger (cached: %s)", async (cached) => {
+    const text = renderItem(gotcha, project);
+    const newer = renderItem({ ...gotcha, content: "Ahead in another clone", updated: later }, project);
+    const fake = fakeMemoryStore(project, { "gk-1": text }, { listsText: true });
+    const newerRef = `${fake.refOf("gk-1")}#2`;
+    fake.items.set(newerRef, newer);
+    const sent: MemoryCache = cached ? { ...emptyCache(), items: { "gk-1": { ref: fake.refOf("gk-1"), text, updated: ts } } } : emptyCache();
+    const { cache, outcome } = await sync(fake, ledger(gotcha), sent, new Set(), true);
+    expect([...fake.items.entries()]).toEqual([[newerRef, newer]]);
+    expect(outcome.newer).toEqual(["gk-1"]);
+    expect(outcome.duplicates).toEqual(["gk-1"]);
+    expect(outcome.written).toEqual([]);
+    expect(cache.items["gk-1"]).toBeUndefined();
+  });
+
   it("removes every copy of a retired entry", async () => {
     const fake = fakeMemoryStore(project, { "gk-1": renderItem(gotcha, project) }, { listsText: true });
     fake.items.set(`${fake.refOf("gk-1")}#2`, renderItem(gotcha, project));

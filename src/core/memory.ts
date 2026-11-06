@@ -130,9 +130,11 @@ const copiesById = (listing: MemoryListing): Map<string, MemoryItem[]> => {
   return copies;
 };
 
-const keeperOf = (copies: MemoryItem[], text: string): MemoryItem =>
-  copies.find((c) => c.text!.trimEnd() === text.trimEnd()) ??
-  copies.reduce((a, b) => ((readSignature(b.text!)?.updated ?? "") > (readSignature(a.text!)?.updated ?? "") ? b : a));
+const keeperOf = (copies: MemoryItem[], text: string): MemoryItem => {
+  const updated = (copy: MemoryItem): string => readSignature(copy.text!)?.updated ?? "";
+  const newest = copies.reduce((a, b) => (updated(b) > updated(a) ? b : a));
+  return copies.find((copy) => updated(copy) === updated(newest) && copy.text!.trimEnd() === text.trimEnd()) ?? newest;
+};
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
