@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reconcile } from "../src/core/memory.js";
+import { MEMORY_SEARCH_WIDTH, reconcile } from "../src/core/memory.js";
 import { findOpenVikingServer, openVikingStore, type McpReply } from "../src/core/memory-openviking.js";
 import { entry } from "./helpers.js";
 
@@ -95,5 +95,81 @@ describe("the OpenViking store", () => {
   it("lists nothing for a project with no folder yet", async () => {
     expect(await server({ list: { isError: false, text: JSON.stringify({ result: `(no entries under ${base})` }) } }).store.list!()).toEqual({ items: [] });
     expect(await server({ list: { isError: true, text: `Error executing tool list: Directory not found: ${base}` } }).store.list!()).toEqual({ items: [] });
+  });
+});
+
+describe("searching OpenViking", () => {
+  const answer = (...lines: string[]): McpReply => ({ isError: false, text: JSON.stringify({ result: lines.join("\n") }) });
+
+  it("searches the shared resources only, wider than what it will show", async () => {
+    const { calls, store } = server({ find: answer("No matching context found.") });
+    expect(await store.search!("how to release", "shared")).toEqual([]);
+    expect(calls).toEqual([{ tool: "find", args: { query: "how to release", limit: MEMORY_SEARCH_WIDTH, level: [2], target_uri: "viking://resources/" } }]);
+  });
+
+  it("searches everything the user keeps when asked for all of it", async () => {
+    const { calls, store } = server({ find: { isError: false, text: "No matching context found." } });
+    expect(await store.search!("how to release", "all")).toEqual([]);
+    expect(calls).toEqual([{ tool: "find", args: { query: "how to release", limit: MEMORY_SEARCH_WIDTH, level: [2] } }]);
+  });
+
+  it("reads each hit with the whole of its abstract, which the server indents only on the first line", async () => {
+    const { store } = server({
+      find: answer(
+        "Found 2 item(s):",
+        "",
+        "- [resource 87%] viking://resources/notes/release.md",
+        "    Release from main only.",
+        "Tag after the build.",
+        "- [memory 41%] viking://user/u1/memories/style.md",
+        "    Prefers short notes",
+        "",
+        "Use the read tool to expand a URI.",
+      ),
+    });
+    expect(await store.search!("release", "all")).toEqual([
+      { ref: "viking://resources/notes/release.md", text: "Release from main only.\nTag after the build." },
+      { ref: "viking://user/u1/memories/style.md", text: "Prefers short notes" },
+    ]);
+  });
+
+  it("ranks hits by score: the server lists them by kind", async () => {
+    const { store } = server({
+      find: answer("Found 3 item(s):", "", "- [memory 36%] viking://user/u1/memories/a.md", "    Weak", "- [memory 41%] viking://user/u1/memories/b.md", "    Fair", "- [resource 95%] viking://resources/notes/c.md", "    Strong"),
+    });
+    expect((await store.search!("x", "all")).map((hit) => hit.text)).toEqual(["Strong", "Fair", "Weak"]);
+  });
+
+  it("knows an Archivist item of any project by its address", async () => {
+    const { store } = server({
+      find: answer("Found 2 item(s):", "", `- [resource 90%] ${base}gk-1.md`, "    One", "- [resource 80%] viking://resources/archivist/local/tools/cmd-2.md", "    Two"),
+    });
+    expect(await store.search!("x", "shared")).toEqual([
+      { ref: `${base}gk-1.md`, text: "One", archivist: { project, id: "gk-1" } },
+      { ref: "viking://resources/archivist/local/tools/cmd-2.md", text: "Two", archivist: { project: "local/tools", id: "cmd-2" } },
+    ]);
+  });
+
+  it("leaves out what has no text yet and what only sums up Archivist's own folders", async () => {
+    const { store } = server({
+      find: answer(
+        "Found 4 item(s):",
+        "",
+        "- [resource 90%] viking://resources/notes/fresh.md",
+        "    (no abstract)",
+        `- [resource 80%] ${base}`,
+        "    All the gotchas of this project",
+        `- [resource 70%] ${base}.overview.md`,
+        "    All the gotchas again",
+        "- [resource 60%] viking://resources/notes/kept.md",
+        "    Kept",
+      ),
+    });
+    expect(await store.search!("x", "shared")).toEqual([{ ref: "viking://resources/notes/kept.md", text: "Kept" }]);
+  });
+
+  it("fails a search the server refused", async () => {
+    const { store } = server({ find: { isError: true, text: "Error executing tool find: embedder offline" } });
+    await expect(store.search!("x", "shared")).rejects.toThrow("embedder offline");
   });
 });

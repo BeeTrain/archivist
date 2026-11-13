@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Mem0Scope } from "../src/core/mem0-scope.js";
-import { MemoryRefused, MemoryRejected } from "../src/core/memory.js";
+import { MEMORY_SEARCH_WIDTH, MemoryRefused, MemoryRejected } from "../src/core/memory.js";
 import { isMem0Cloud, MEM0_CLOUD_URL, mem0CloudStore, mem0ServerStore, mem0StoreName, mem0Transport, type Fetcher, type HttpCall, type HttpReply } from "../src/core/memory-mem0.js";
 
 const project = "github.com/beetrain/archivist";
@@ -288,5 +288,61 @@ describe("the store on an own mem0 server", () => {
 
   it("reads for free and carries the text in its listing", () => {
     expect(store(fakeHttp([]).http)).toMatchObject({ name: "mem0-localhost-8888", readsCostQuota: false, listsText: true });
+  });
+});
+
+describe("searching mem0", () => {
+  const fact = (id: string, score: number, extra: Record<string, unknown> = {}) => ({ id, memory: `fact ${id}`, score, created_at: "2026-10-20T10:00:00.000000+00:00", ...extra });
+  const hit = (id: string) => ({ ref: id, text: `fact ${id}`, changed: "2026-10-20T10:00:00.000000+00:00" });
+  const projectChannel = { AND: [{ agent_id: "BeeTrain-archivist-0123456789" }, { app_id: "BeeTrain-archivist" }] };
+  const personalChannel = { AND: [{ user_id: "dev-user" }, { app_id: "BeeTrain-archivist" }] };
+
+  it("looks only in the project's channel of the cloud for shared facts", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [fact("uuid-1", 0.9)] })]);
+    expect(await mem0CloudStore(http, scope, project).search!("how to release", "shared")).toEqual([hit("uuid-1")]);
+    expect(calls).toEqual([{ method: "POST", path: "/v3/memories/search/", body: { query: "how to release", filters: projectChannel, top_k: MEMORY_SEARCH_WIDTH } }]);
+  });
+
+  it("adds the user's own channel of the cloud when asked for all of it", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [] })]);
+    expect(await mem0CloudStore(http, scope, project).search!("how to release", "all")).toEqual([]);
+    expect(calls[0]?.body).toEqual({ query: "how to release", filters: { OR: [projectChannel, personalChannel] }, top_k: MEMORY_SEARCH_WIDTH });
+  });
+
+  it("knows an Archivist item of any project by its metadata", async () => {
+    const { http } = fakeHttp([json(200, { results: [fact("uuid-1", 0.9, { metadata: { archivist_project: "github.com/acme/tools", archivist_id: "cmd-2" } }), fact("uuid-2", 0.8, { metadata: { source: "chat" } })] })]);
+    expect(await mem0CloudStore(http, scope, project).search!("x", "shared")).toEqual([{ ...hit("uuid-1"), archivist: { project: "github.com/acme/tools", id: "cmd-2" } }, hit("uuid-2")]);
+  });
+
+  it("dates a fact by its last change: mem0 may fold new facts into an old memory", async () => {
+    const { http } = fakeHttp([json(200, { results: [fact("uuid-1", 0.9, { updated_at: "2026-11-06T10:00:00.000000+00:00" })] })]);
+    expect(await mem0CloudStore(http, scope, project).search!("x", "shared")).toEqual([{ ...hit("uuid-1"), changed: "2026-11-06T10:00:00.000000+00:00" }]);
+  });
+
+  it("leaves out a result with no id or no text", async () => {
+    const { http } = fakeHttp([json(200, { results: [{ id: "uuid-1", score: 0.9 }, { memory: "no id", score: 0.8 }, fact("uuid-2", 0.7)] })]);
+    expect(await mem0CloudStore(http, scope, project).search!("x", "shared")).toEqual([hit("uuid-2")]);
+  });
+
+  it("passes on a refusal and a rejection of the search", async () => {
+    await expect(mem0CloudStore(fakeHttp([json(429, { detail: "quota" })]).http, scope, project).search!("x", "shared")).rejects.toBeInstanceOf(MemoryRefused);
+    await expect(mem0CloudStore(fakeHttp([json(400, { detail: "bad filter" })]).http, scope, project).search!("x", "shared")).rejects.toBeInstanceOf(MemoryRejected);
+  });
+
+  it("names the project's channel at the top of the filter on an own server, as it demands", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [fact("uuid-1", 0.9)] })]);
+    expect(await mem0ServerStore(http, scope, project, "mem0-localhost-8888").search!("how to release", "shared")).toEqual([hit("uuid-1")]);
+    expect(calls).toEqual([{ method: "POST", path: "/search", body: { query: "how to release", filters: { agent_id: "BeeTrain-archivist-0123456789" }, top_k: MEMORY_SEARCH_WIDTH } }]);
+  });
+
+  it("asks an own server about each channel apart and joins the answers by score, without repeats", async () => {
+    const { calls, http } = fakeHttp([json(200, { results: [fact("uuid-1", 0.5), fact("uuid-2", 0.4)] }), json(200, { results: [fact("uuid-3", 0.9), fact("uuid-1", 0.5)] })]);
+    expect(await mem0ServerStore(http, scope, project, "mem0-localhost-8888").search!("x", "all")).toEqual([hit("uuid-3"), hit("uuid-1"), hit("uuid-2")]);
+    expect(calls.map((c) => (c.body as { filters: unknown }).filters)).toEqual([{ agent_id: "BeeTrain-archivist-0123456789" }, { user_id: "dev-user" }]);
+  });
+
+  it("takes an answer an own server sends as a bare array", async () => {
+    const { http } = fakeHttp([json(200, [fact("uuid-1", 0.9)])]);
+    expect(await mem0ServerStore(http, scope, project, "mem0-localhost-8888").search!("x", "shared")).toEqual([hit("uuid-1")]);
   });
 });

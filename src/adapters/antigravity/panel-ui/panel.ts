@@ -72,7 +72,7 @@ const state: {
   refreshing: false,
 };
 
-const app = new App({ name: "Archivist", version: "1.9.1" }, {});
+const app = new App({ name: "Archivist", version: "1.9.2" }, {});
 
 const applyHost = (ctx: ReturnType<App["getHostContext"]>) => {
   if (!ctx) return;

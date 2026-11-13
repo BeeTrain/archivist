@@ -19,7 +19,7 @@ import {
 
 export const PANEL_RESOURCE_URI = "ui://archivist/panel.html";
 export const PANEL_MIME_TYPE = "text/html;profile=mcp-app";
-export const MCP_SERVER_VERSION = "1.9.1";
+export const MCP_SERVER_VERSION = "1.9.2";
 
 export interface JsonRpcRequest {
   jsonrpc?: string;

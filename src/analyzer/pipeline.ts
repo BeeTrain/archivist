@@ -3,6 +3,7 @@ import type { Config } from "../core/config.js";
 import { PATHS, joinPath, type Io, type Llm } from "../core/io.js";
 import { activeEntries, appendLedger, loadState, parseLedger } from "../core/ledger.js";
 import { withLock } from "../core/lock.js";
+import { factsForTask, type MemoryReader } from "../core/memory-search.js";
 import { redact, isExcluded } from "../core/privacy.js";
 import { groupAreas, renderAll } from "../core/render.js";
 import { appendAnalysis, appendMetrics, loadAnalyses, loadMetrics, toMetrics } from "../core/metrics.js";
@@ -70,6 +71,7 @@ export const analyzeSegment = async (args: {
   messages?: Message[];
   /** Tokens in the live context: above `forkMaxContextTokens` the reflection costs more than it is worth. */
   contextTokens?: number;
+  memory?: MemoryReader;
   reviewOnly?: boolean;
   shouldCommit?: () => Promise<boolean>;
   now: Date;
@@ -117,10 +119,6 @@ export const analyzeSegment = async (args: {
   let reflectUsage: Usage | undefined;
   let error: string | undefined;
   const tooBig = (args.contextTokens ?? 0) > config.analyzer.forkMaxContextTokens;
-  const note =
-    [tooBig ? `reflect skipped: context ${args.contextTokens} tokens > ${config.analyzer.forkMaxContextTokens}` : "", expired.length ? `${expired.length} unreviewed proposals expired` : ""]
-      .filter(Boolean)
-      .join("; ") || undefined;
   if (config.analyzer.reflect === "fork" && llm.reflect && args.messages && !tooBig) {
     const r = await llm.reflect(reflectPrompt(seg.prompts[0], config.language, inPlay));
     reflectUsage = toUsage(r.usage);
@@ -135,8 +133,22 @@ export const analyzeSegment = async (args: {
   notes = redact(notes).text;
   if (args.reviewOnly && notes.length > 40000) notes = `${notes.slice(0, 16000)}\n…\n${notes.slice(-24000)}`;
 
+  const remembered = await factsForTask(args.memory, { prompt: seg.prompts[0], edits: signals.edits, known: new Set(state.entries.keys()), startedAt: seg.startedAt });
+  const note =
+    [
+      tooBig ? `reflect skipped: context ${args.contextTokens} tokens > ${config.analyzer.forkMaxContextTokens}` : "",
+      expired.length ? `${expired.length} unreviewed proposals expired` : "",
+      remembered.note ?? "",
+    ]
+      .filter(Boolean)
+      .join("; ") || undefined;
+
   // 2. Curate: notes → ops against the relevant existing entries.
-  const c = await llm.complete({ system: CURATE_SYSTEM, prompt: curatePrompt({ notes, notesKind, signals: signalsText(signals), candidates: inPlay, language: config.language }), maxTokens: 2500 });
+  const c = await llm.complete({
+    system: CURATE_SYSTEM,
+    prompt: curatePrompt({ notes, notesKind, signals: signalsText(signals), candidates: inPlay, memoryFacts: remembered.facts, language: config.language }),
+    maxTokens: 2500,
+  });
   const curateUsage = toUsage(c.usage);
   usage = addUsage(usage, curateUsage);
   const reply = c.ok ? parseCuratorReply(c.text) : undefined;
@@ -161,6 +173,7 @@ export const analyzeSegment = async (args: {
       skipped: await loadSkipped(io),
       procedureCandidates: (await readLines(io, CANDIDATES)).map((l) => (JSON.parse(l) as { text: string }).text),
       pending: (await listProposals(io)).map((p) => ({ id: p.id, op: p.op })),
+      groundedIn: remembered.facts.length ? [notes, signalsText(signals), ...inPlay.map((e) => `${e.title} ${e.content}`)].join("\n") : undefined,
     });
     if (args.reviewOnly) {
       v.proposals.push(...v.applied.map((outcome) => ({ ...outcome, reason: outcome.reason ?? `${io.target ?? "adapter"}: review required` })));
@@ -202,7 +215,14 @@ export const analyzeSegment = async (args: {
       proposals,
       rejected: v.rejected,
       written,
-      analysis: { notesKind, ...(reflectUsage ? { reflect: reflectUsage } : {}), curate: curateUsage, ...(note ? { note } : {}), ...(error ? { error } : {}) },
+      analysis: {
+        notesKind,
+        ...(reflectUsage ? { reflect: reflectUsage } : {}),
+        curate: curateUsage,
+        ...(remembered.facts.length ? { memory: remembered.facts } : {}),
+        ...(note ? { note } : {}),
+        ...(error ? { error } : {}),
+      },
     };
     const reportPath = joinPath(PATHS.reports, `${ts.replace(/[:.]/g, "-")}.md`);
     await io.write(reportPath, reportMarkdown(report));

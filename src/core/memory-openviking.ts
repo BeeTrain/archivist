@@ -1,4 +1,4 @@
-import type { MemoryStore } from "./memory.js";
+import { MEMORY_SEARCH_WIDTH, type MemoryHit, type MemoryStore } from "./memory.js";
 
 export interface McpReply {
   text: string;
@@ -32,6 +32,29 @@ const textOrThrow = (reply: McpReply): string => {
   return unwrapped(reply.text);
 };
 
+const HIT_HEADER = /^- \[\w+ (\d+)%\] (viking:\/\/\S+)$/;
+const FILES_ONLY = [2];
+const READ_MORE = "Use the read tool to expand a URI.";
+const NO_ABSTRACT = "(no abstract)";
+const ARCHIVIST_FOLDER = "viking://resources/archivist/";
+const ARCHIVIST_ITEM = /^viking:\/\/resources\/archivist\/(.+)\/([^./][^/]*)\.md$/;
+
+const hitsIn = (answer: string): MemoryHit[] => {
+  const found: { ref: string; percent: number; lines: string[] }[] = [];
+  for (const line of answer.split("\n")) {
+    const header = line.match(HIT_HEADER);
+    if (header) found.push({ ref: header[2]!, percent: Number(header[1]), lines: [] });
+    else if (line.trim() !== READ_MORE) found.at(-1)?.lines.push(line.trim());
+  }
+  const best = [...found].sort((a, b) => b.percent - a.percent);
+  return best.flatMap(({ ref, lines }) => {
+    const text = lines.join("\n").trim();
+    const item = ref.match(ARCHIVIST_ITEM);
+    if (!text || text === NO_ABSTRACT || (ref.startsWith(ARCHIVIST_FOLDER) && !item)) return [];
+    return [{ ref, text, ...(item ? { archivist: { project: item[1]!, id: item[2]! } } : {}) }];
+  });
+};
+
 export const openVikingStore = (call: McpCall, project: string): MemoryStore => {
   const folder = `viking://resources/archivist/${project}/`;
   const uriOf = (id: string) => `${folder}${id}.md`;
@@ -61,6 +84,10 @@ export const openVikingStore = (call: McpCall, project: string): MemoryStore => 
         .filter((id): id is string => Boolean(id))
         .map((id) => ({ id, ref: uriOf(id) }));
       return { items };
+    },
+    async search(query, reach) {
+      const where = reach === "shared" ? { target_uri: "viking://resources/" } : {};
+      return hitsIn(textOrThrow(await call("find", { query, limit: MEMORY_SEARCH_WIDTH, level: FILES_ONLY, ...where })));
     },
   };
 };

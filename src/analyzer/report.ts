@@ -1,3 +1,4 @@
+import { factLine, type MemoryFact } from "../core/memory-search.js";
 import type { Outcome } from "../core/validate.js";
 import type { Usage } from "../core/types.js";
 import type { Signals } from "./signals.js";
@@ -13,7 +14,7 @@ export interface Report {
   proposals: Outcome[];
   rejected: Outcome[];
   written: string[];
-  analysis: { reflect?: Usage; curate?: Usage; notesKind: "reflection" | "digest"; note?: string; error?: string };
+  analysis: { reflect?: Usage; curate?: Usage; notesKind: "reflection" | "digest"; memory?: MemoryFact[]; note?: string; error?: string };
 }
 
 const k = (n: number): string => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
@@ -63,6 +64,7 @@ export const reportMarkdown = (r: Report): string => {
   if (r.proposals.length) lines.push("", "## Waiting for review", "", ...r.proposals.map(outcomeLine));
   if (r.rejected.length) lines.push("", "## Dropped", "", ...r.rejected.map(outcomeLine));
   if (sv.toolCalls || sv.tokens) lines.push("", `**Expected savings on a similar task:** ≈ ${sv.toolCalls} tool calls, ≈ ${k(sv.tokens)} tokens.`);
+  if (r.analysis.memory?.length) lines.push("", "## Shown from memory", "", ...r.analysis.memory.map(factLine));
   if (r.written.length) lines.push("", "## Files", "", ...r.written.map((w) => `- \`${w}\``));
   const a = r.analysis;
   const cost = [a.reflect && `reflect in ${k(a.reflect.input + a.reflect.cacheRead)}/out ${k(a.reflect.output)}`, a.curate && `curate in ${k(a.curate.input)}/out ${k(a.curate.output)}`]

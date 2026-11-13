@@ -18,6 +18,7 @@ import { clearMemory, loadMemoryCaches, memoryOutcomeText, memoryPaused, memoryU
 import { findOpenVikingServer, openVikingStore, type McpCall } from '../../../core/memory-openviking.js'
 import { mem0Scope } from '../../../core/mem0-scope.js'
 import { memoryLane } from '../../../core/memory-lane.js'
+import { openMemoryReader, recallAcross, type MemoryReader } from '../../../core/memory-search.js'
 import { mem0CloudStore, mem0ServerStore, mem0StoreName, mem0Transport, type Fetcher, type Mem0Auth } from '../../../core/memory-mem0.js'
 import {
   CLOUD_PROJECTS_OPTION,
@@ -293,6 +294,16 @@ async function memoryStore($: any, base: string, place: MemoryPlace): Promise<Me
   return undefined
 }
 
+async function memoryReader($: any, base: string, config: Config): Promise<MemoryReader | undefined> {
+  try {
+    const place = await memoryPlace($, base, config)
+    return await openMemoryReader({ config, place, store: () => memoryStore($, base, place), sleep: (ms) => $.clock.sleep(ms) })
+  } catch (err) {
+    await log($, base, `memory read: failed: ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
+  }
+}
+
 async function hintCloudOnce($: any, base: string, project: string, text: string): Promise<void> {
   const key = CLOUD_HINT_KEY + project
   if (await $.store.get(key)) return
@@ -424,6 +435,7 @@ async function analyse($: any, stored: StoredSegment, current: boolean): Promise
       config,
       segment: s,
       ...(current ? { messages: await readMessages($), contextTokens: usage.context?.tokens ?? 0 } : {}),
+      memory: await memoryReader($, stored.root, config),
       now: new Date(),
     })
     // The task is done with, whatever came of it: never analyse it twice.
@@ -625,7 +637,12 @@ export function register(on: On, options: PluginOptions): void {
           memoryInUse: storeNameFor(memoryOptions) ?? null,
         }),
       }
-    if (verb === 'recall') return { text: recallText((await loadState(io)).entries, rest.join(' ')) }
+    if (verb === 'recall') {
+      const { entries } = await loadState(io)
+      const query = rest.join(' ')
+      const memory = await memoryReader($, root, await loadConfig(io))
+      return { text: await recallAcross({ journal: recallText(entries, query), memory, query, known: new Set(entries.keys()) }) }
+    }
     if (verb === 'apply' || verb === 'skip') {
       const chosen = pick(await listProposals(io), rest.join(','))
       if (!chosen.length) return { text: `Usage: /archivist ${verb} <n|1,3|all> — numbers from /archivist review.` }

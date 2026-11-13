@@ -1,5 +1,5 @@
 import type { Mem0Scope } from "./mem0-scope.js";
-import { MemoryRefused, MemoryRejected, readSignature, type MemoryItem, type MemoryListing, type MemoryStore, type Signature } from "./memory.js";
+import { MEMORY_SEARCH_WIDTH, MemoryRefused, MemoryRejected, readSignature, type MemoryHit, type MemoryItem, type MemoryListing, type MemoryStore, type Signature } from "./memory.js";
 
 export interface HttpReply {
   status: number;
@@ -93,12 +93,27 @@ interface Mem0Memory {
   id?: string;
   memory?: string;
   metadata?: Record<string, unknown> | null;
+  created_at?: string;
+  updated_at?: string;
+  score?: number;
 }
+
+const rowsOf = (answer: Mem0Memory[] | { results?: Mem0Memory[] } | undefined): Mem0Memory[] => (Array.isArray(answer) ? answer : (answer?.results ?? []));
 
 const itemsOf = (memories: Mem0Memory[]): MemoryItem[] =>
   memories.flatMap((m) => {
     const id = m.metadata?.archivist_id;
     return m.id && typeof id === "string" ? [{ ref: m.id, id, ...(typeof m.memory === "string" ? { text: m.memory } : {}) }] : [];
+  });
+
+const hitsOf = (memories: Mem0Memory[]): MemoryHit[] =>
+  memories.flatMap((m) => {
+    if (!m.id || typeof m.memory !== "string") return [];
+    const project = m.metadata?.archivist_project;
+    const id = m.metadata?.archivist_id;
+    const archivist = typeof project === "string" && typeof id === "string" ? { archivist: { project, id } } : {};
+    const changed = m.updated_at ?? m.created_at;
+    return [{ ref: m.id, text: m.memory, ...(changed ? { changed } : {}), ...archivist }];
   });
 
 const newestOf = (copies: MemoryItem[]): { ref: string; text: string } | undefined => {
@@ -168,6 +183,12 @@ export const mem0CloudStore = (http: HttpCall, scope: Mem0Scope, project: string
     remove,
     fetch: async (id) => newestOf(await listWhere({ archivist_key: `archivist/${project}/${id}` })),
     list: async () => ({ items: await listWhere({ archivist_project: project }) }),
+    async search(query, reach) {
+      const projectChannel = { AND: [{ agent_id: scope.agentId }, { app_id: scope.appId }] };
+      const personalChannel = { AND: [{ user_id: scope.userId }, { app_id: scope.appId }] };
+      const filters = reach === "shared" ? projectChannel : { OR: [projectChannel, personalChannel] };
+      return hitsOf(rowsOf(answerOf<{ results?: Mem0Memory[] }>(await http("POST", "/v3/memories/search/", { query, filters, top_k: MEMORY_SEARCH_WIDTH }))));
+    },
   };
 };
 
@@ -178,11 +199,13 @@ export const mem0ServerStore = (http: HttpCall, scope: Mem0Scope, project: strin
     addedId(await http("POST", "/memories", { messages: [{ role: "user", content: text }], infer: false, agent_id: scope.agentId, user_id: scope.userId, metadata: metadataOf(signature) }));
   const listNow = async (): Promise<MemoryListing> => {
     const answer = answerOf<Mem0Memory[] | { results?: Mem0Memory[] }>(await http("GET", `/memories?agent_id=${encodeURIComponent(scope.agentId)}&top_k=${SERVER_LIST_LIMIT}`));
-    const rows = Array.isArray(answer) ? answer : (answer?.results ?? []);
+    const rows = rowsOf(answer);
     return { items: itemsOf(rows.filter((row) => row.metadata?.archivist_project === project)), cut: rows.length >= SERVER_LIST_LIMIT };
   };
   let lastListing: Promise<MemoryListing> | undefined;
   const list = (): Promise<MemoryListing> => (lastListing = listNow());
+  const searchChannel = async (query: string, filters: Record<string, string>): Promise<Mem0Memory[]> =>
+    rowsOf(answerOf<Mem0Memory[] | { results?: Mem0Memory[] }>(await http("POST", "/search", { query, filters, top_k: MEMORY_SEARCH_WIDTH })));
   return {
     name,
     readsCostQuota: false,
@@ -204,5 +227,11 @@ export const mem0ServerStore = (http: HttpCall, scope: Mem0Scope, project: strin
       return newestOf((await (lastListing ?? list())).items.filter((item) => item.id === id));
     },
     list,
+    async search(query, reach) {
+      if (reach === "shared") return hitsOf(await searchChannel(query, { agent_id: scope.agentId }));
+      const channels = await Promise.all([searchChannel(query, { agent_id: scope.agentId }), searchChannel(query, { user_id: scope.userId })]);
+      const once = new Map(channels.flat().map((row) => [row.id, row]));
+      return hitsOf([...once.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)));
+    },
   };
 };
