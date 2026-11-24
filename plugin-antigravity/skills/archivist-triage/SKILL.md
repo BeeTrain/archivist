@@ -21,4 +21,4 @@ If empty, say so in one line and stop.
    - Skip anything unrelated to this project first.
    - Ask the user about the remaining items in one short message in plain words (no raw IDs), then apply or skip according to their reply.
 
-4. Summarize what was applied, skipped, and what remains (or remind them they can also review proposals visually in [Archivist](sidecar://archivist/archivist_panel/)).
+4. Summarize what was applied, skipped, and what remains (or remind them they can also review proposals visually in the **Archivist** UI panel via `archivist_panel` or the side pane).

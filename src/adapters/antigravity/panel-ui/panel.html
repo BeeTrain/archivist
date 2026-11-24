@@ -4,8 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Archivist</title>
-  <script src="/preload.js"></script>
-  <link rel="stylesheet" href="/styles.css">
+  <style>/*__ARCHIVIST_CSS__*/</style>
 </head>
 <body>
   <div class="shell">
@@ -41,7 +40,7 @@
             <strong id="analysis-label">Загрузка…</strong>
           </div>
           <div class="status-actions">
-            <button type="button" id="btn-toggle-analysis" class="btn btn-ghost btn-xs hidden">Включить анализ</button>
+            <button type="button" id="btn-toggle-analysis" class="btn btn-ghost btn-xs hidden">Вкл. анализ</button>
             <button type="button" id="btn-run-analysis" class="btn btn-ghost btn-xs hidden" title="Проверить очередь анализа">Запустить</button>
           </div>
         </div>
@@ -76,7 +75,6 @@
         <button type="button" id="btn-init" class="btn btn-primary">Инициализировать .archivist/</button>
       </section>
 
-      <!-- Tab: Entries -->
       <section id="tab-entries" class="tab-panel">
         <div class="toolbar">
           <input id="search" class="input" type="search" placeholder="Поиск по заголовкам, тексту, путям…">
@@ -131,12 +129,10 @@
         <div id="entries-list" class="list"></div>
       </section>
 
-      <!-- Tab: Review Proposals -->
       <section id="tab-proposals" class="tab-panel hidden">
         <div id="proposals-list" class="list"></div>
       </section>
 
-      <!-- Tab: Reports -->
       <section id="tab-reports" class="tab-panel hidden">
         <div class="toolbar">
           <select id="report-select" class="select" aria-label="Выбор отчёта"></select>
@@ -144,7 +140,6 @@
         <pre id="report-body" class="report-pre">Отчётов пока нет.</pre>
       </section>
 
-      <!-- Tab: Console & Diagnostics -->
       <section id="tab-tools" class="tab-panel hidden">
         <div class="card">
           <h3>Сбор событий Antigravity</h3>
@@ -170,6 +165,6 @@
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   </div>
-  <script src="/app.js"></script>
+  <script>/*__ARCHIVIST_JS__*/</script>
 </body>
 </html>

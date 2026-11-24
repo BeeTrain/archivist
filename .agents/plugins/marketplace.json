@@ -10,7 +10,7 @@
         "source": "git-subdir",
         "url": "https://github.com/BeeTrain/archivist.git",
         "path": "./plugin-codex",
-        "ref": "v1.9.0"
+        "ref": "v1.9.1"
       },
       "policy": {
         "installation": "AVAILABLE",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.9.1 — 2026-11-24
+
+- Переведена UI-панель Antigravity с недокументированного sidecar на официальный **Antigravity MCP App** (`mcp_config.json`, `bin/archivist-mcp`, `ui/panel.html` на `@modelcontextprotocol/ext-apps`): панель теперь регистрируется и открывается из меню правой вспомогательной панели (`aux_pane`), левого сайдбара (`global`) и по вызову MCP-инструмента `archivist_panel`.
+- Обновлены `rules/AGENTS.md`, навыки (`archivist-panel`, `archivist-setup`, `archivist-triage`), сборка, валидатор `validate:antigravity`, тесты и документация.
+
 ## 1.9.0 — 2026-11-24
 
 - Добавлен нативный пакет Archivist для **Google Antigravity** (`plugin-antigravity/`): общая база знаний `.archivist/`, правила `.archivist/antigravity/rules/`, навыки (`archivist-setup`, `archivist-panel`, `archivist-recall`, `archivist-remember`, `archivist-decide`, `archivist-triage`, `archivist-collection`) и CLI с поддержкой `--target antigravity`.

@@ -15,5 +15,5 @@ node "<plugin-root>/bin/archivist" doctor
 2. Explain concisely:
    - Shared knowledge lives in `.archivist/ledger.jsonl`, `.archivist/INDEX.md`, and `.archivist/decisions/`.
    - Antigravity-specific rendered rules live in `.archivist/antigravity/rules/` and generated procedures in `.agents/skills/`.
-   - Open the live UI panel in the right Auxiliary Pane via [Archivist](sidecar://archivist/archivist_panel/).
+   - Open the live UI panel via the `archivist_panel` MCP tool, from the right side pane menu, or from the left sidebar (**Archivist**).
    - Background analysis is opt-in: enable it with `node "<plugin-root>/bin/archivist" analysis enable` (or directly in the UI panel). It uses `agy` CLI in print mode (`agy -p`) and sends all changes to the review queue.

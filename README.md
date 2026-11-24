@@ -2,7 +2,7 @@
 
 Archivist — плагин для **Claude Code, Codex, OpenCode и Google Antigravity**, который сохраняет знания из задач агента: точные команды, неочевидные ловушки и принятые решения с причинами. В следующих сессиях агент получает эти записи и тратит меньше времени, токенов и контекста на разведку. Все версии используют общую базу знаний проекта; в Claude Code и OpenCode фоновый анализ работает после подключения, а в Codex и Antigravity включается отдельно для проекта. Codex, OpenCode и Antigravity отправляют все результаты анализа на ревью.
 
-Статус: **v1.9.0**. Для Claude Code ≥ 2.1.290 (терминал, десктоп, VS Code) пакет находится в `plugin/`, для Codex с поддержкой плагинов и command hooks — в `plugin-codex/`, для OpenCode **2.2.5 (V2)** — в `plugin-opencode/`, для **Google Antigravity** (с нативной UI-панелью в Auxiliary Pane и lifecycle hooks) — в `plugin-antigravity/`. Нужен Node.js ≥ 20; фоновому анализу Codex нужен установленный и авторизованный Codex CLI, а фоновому анализу Antigravity — установленный и авторизованный `agy` CLI. План развития — в [PLAN.md](PLAN.md), устройство мода Claude Code — в [docs/spikes.md](docs/spikes.md), особенности Codex — в [docs/codex.md](docs/codex.md), особенности OpenCode — в [plugin-opencode/README.md](plugin-opencode/README.md), особенности Antigravity — в [plugin-antigravity/README.md](plugin-antigravity/README.md).
+Статус: **v1.9.1**. Для Claude Code ≥ 2.1.290 (терминал, десктоп, VS Code) пакет находится в `plugin/`, для Codex с поддержкой плагинов и command hooks — в `plugin-codex/`, для OpenCode **2.2.5 (V2)** — в `plugin-opencode/`, для **Google Antigravity** (с UI-панелью на базе MCP Apps в правой панели и сайдбаре и lifecycle hooks) — в `plugin-antigravity/`. Нужен Node.js ≥ 20; фоновому анализу Codex нужен установленный и авторизованный Codex CLI, а фоновому анализу Antigravity — установленный и авторизованный `agy` CLI. План развития — в [PLAN.md](PLAN.md), устройство мода Claude Code — в [docs/spikes.md](docs/spikes.md), особенности Codex — в [docs/codex.md](docs/codex.md), особенности OpenCode — в [plugin-opencode/README.md](plugin-opencode/README.md), особенности Antigravity — в [plugin-antigravity/README.md](plugin-antigravity/README.md).
 
 ## Как это работает
 
@@ -21,7 +21,7 @@ Archivist — плагин для **Claude Code, Codex, OpenCode и Google Antig
 
    В Antigravity анализ по умолчанию выключен. После включения отдельный процесс `agy` CLI (`--output-format json --disable-slash-commands --json-schema ... -p ...`) обрабатывает очищенный дайджест; все изменения отправляются на ревью. Новое сообщение сдвигает ожидание и отменяет устаревший анализ; очередь и дневные лимиты сохраняются на диске.
 3. **Самопроверка**: Claude Code измеряет каждую задачу (токены, инструменты, чтения и ошибки) и использование записей: правило загрузилось, команда выполнилась, агент сообщил о пользе или ошибке. В Codex навык `collection` и в Antigravity навык `archivist-collection` (а также вкладка «Консоль» в UI-панели) показывают доставку событий и состояние анализа; в OpenCode состояние очереди видно в панели и через `analysis status`. Сравнение с baseline сессий для Codex, OpenCode и Antigravity пока недоступно. Общий CLI проверяет знания через `lint` и находит давно неиспользуемые записи через `gc`.
-4. **Отчёт**: в Claude Code — короткий итог в статус-строке («📚 +2 entries · 1 to review»), toast, строка под следующим ответом и полный отчёт по `/archivist`. В Codex — живая панель рядом с чатом: записи, поиск, очередь ревью и состояние анализа. Её открывает навык `panel`; предложения разбирает навык `triage`. В OpenCode Desktop — индикатор 📚 над полем ввода и панель с записями, поиском, ревью и последним отчётом. Она открывается по индикатору или `/archivist-panel`; предложения можно принять или отклонить прямо в ней. В Antigravity — нативная UI-панель в правой вспомогательной панели (Auxiliary Pane, открывается навыком `archivist-panel` или ссылкой `[Archivist](sidecar://archivist/archivist_panel/)`): переключение проектов, поиск и фильтрация записей, добавление и вывод из правил, принятие и отклонение предложений, просмотр отчётов и управление анализом. Обновление интерфейса не вызывает модель.
+4. **Отчёт**: в Claude Code — короткий итог в статус-строке («📚 +2 entries · 1 to review»), toast, строка под следующим ответом и полный отчёт по `/archivist`. В Codex — живая панель рядом с чатом: записи, поиск, очередь ревью и состояние анализа. Её открывает навык `panel`; предложения разбирает навык `triage`. В OpenCode Desktop — индикатор 📚 над полем ввода и панель с записями, поиском, ревью и последним отчётом. Она открывается по индикатору или `/archivist-panel`; предложения можно принять или отклонить прямо в ней. В Antigravity — UI-панель на базе MCP Apps: открывается из меню правой вспомогательной панели (`aux_pane`), из левого сайдбара (`global`) или по вызову инструмента `archivist_panel` / навыка `archivist-panel`: переключение проектов, поиск и фильтрация записей, добавление и вывод из правил, принятие и отклонение предложений, просмотр отчётов и управление анализом. Обновление интерфейса не вызывает модель.
 
 Отдельный API-ключ для Archivist не нужен. Claude Code использует авторизацию самой сессии, Codex — авторизацию установленного Codex CLI, OpenCode — настроенного в нём провайдера модели, Antigravity — авторизацию установленного `agy` CLI. Вызовы анализа расходуют лимиты соответствующего аккаунта или оплачиваются по тарифу провайдера.
 
@@ -137,7 +137,7 @@ node /absolute/path/to/plugin-codex/bin/archivist analysis status
 
 ### Antigravity
 
-Нужен **Google Antigravity** с поддержкой пользовательских плагинов, hooks и UI-sidecar. Используй локальный каталог `plugin-antigravity/` из этого репозитория (собранные файлы уже включены в пакет).
+Нужен **Google Antigravity** с поддержкой пользовательских плагинов, hooks и MCP Apps. Используй локальный каталог `plugin-antigravity/` из этого репозитория (собранные файлы уже включены в пакет).
 
 Подключи плагин глобально симлинком в каталог плагинов Antigravity:
 
@@ -145,7 +145,7 @@ node /absolute/path/to/plugin-codex/bin/archivist analysis status
 ln -s /absolute/path/to/archivist/plugin-antigravity ~/.gemini/config/plugins/archivist
 ```
 
-В нужном проекте вызови навык `archivist-setup` (или нажми «Инициализировать `.archivist/`» в UI-панели): создаётся `.archivist/`, считываются команды проекта и регистрируется рабочее пространство для панели. Живая панель открывается в правой вспомогательной панели (Auxiliary Pane) навыком `archivist-panel`.
+В нужном проекте вызови навык `archivist-setup` (или нажми «Инициализировать `.archivist/`» в UI-панели): создаётся `.archivist/`, считываются команды проекта и регистрируется рабочее пространство для панели. Живая панель доступна в меню правой вспомогательной панели (`aux_pane`), в левом сайдбаре (`global`) и по вызову MCP-инструмента `archivist_panel` (навык `archivist-panel`).
 
 Знания можно сохранять сразу через `archivist-remember`, `archivist-decide` или форму в UI-панели. Чтобы включить фоновый анализ, нажми «Вкл. анализ» в панели или выполни из каталога проекта:
 
@@ -170,7 +170,7 @@ npm install
 npm run build
 ```
 
-Сборка обновляет `plugin/hooks/register.js` (мод Claude Code), `plugin/bin/archivist` (общий CLI), `plugin-codex/bin/archivist` (CLI и hooks Codex), `plugin-opencode/index.js`, `plugin-opencode/bin/archivist` и `plugin-opencode/ui/gui-experimental.cjs` (сервер, CLI и интерфейс OpenCode), а также `plugin-antigravity/bin/archivist` и `plugin-antigravity/sidecars/archivist_panel/main.mjs` (CLI, hooks и UI-sidecar Antigravity). Собранные файлы лежат в git, чтобы подключение не требовало сборки. Для сборки GUI OpenCode нужны Node.js 20.19+ или ≥ 22.12. Запуск Claude Code с плагином из рабочей копии:
+Сборка обновляет `plugin/hooks/register.js` (мод Claude Code), `plugin/bin/archivist` (общий CLI), `plugin-codex/bin/archivist` (CLI и hooks Codex), `plugin-opencode/index.js`, `plugin-opencode/bin/archivist` и `plugin-opencode/ui/gui-experimental.cjs` (сервер, CLI и интерфейс OpenCode), а также `plugin-antigravity/bin/archivist`, `plugin-antigravity/bin/archivist-mcp` и `plugin-antigravity/ui/panel.html` (CLI, hooks, MCP-сервер и самодостаточный HTML MCP App для Antigravity). Собранные файлы лежат в git, чтобы подключение не требовало сборки. Для сборки GUI OpenCode нужны Node.js 20.19+ или ≥ 22.12. Запуск Claude Code с плагином из рабочей копии:
 
 ```bash
 claude --plugin-dir ./plugin
@@ -429,7 +429,7 @@ Antigravity всегда анализирует дайджест и отправ
 - В Claude Code данные передаются модели через авторизацию сессии и в систему памяти, выбранную в `/config`. Внешняя память получает только очищенные записи, без отчётов, промптов и метрик. В облако mem0 они уходят только для включённых проектов и с ключом из настроек плагина или `MEM0_API_KEY`; на свой сервер mem0 ключ из окружения не уходит. Свой сервер mem0 считает эмбеддинги через OpenAI или Gemini, поэтому текст записей попадает и туда. Синхронизация отключается через `off` в `/config` или `memory.enabled: false` для проекта.
 - В Codex без анализа сохраняются только метаданные событий, идентификаторы хешируются. После включения очищенный дайджест и релевантные знания передаются отдельному процессу Codex CLI. Полные результаты инструментов, патчи и транскрипты не сохраняются; подробности — в [docs/codex.md](docs/codex.md#данные-и-приватность).
 - В OpenCode очищенные запросы и ответы, цели инструментов, краткие ошибки и метрики остаются в `.archivist/.local/opencode/`. Для анализа модели передаются дайджест и релевантные знания. Содержимое прочитанных файлов, патчи и рассуждения не собираются. Панель читает данные текущего проекта через сервер OpenCode и не обращается к модели. Телеметрии Archivist нет ни на одной платформе.
-- В Antigravity без анализа сохраняются только метаданные событий, идентификаторы хешируются; список зарегистрированных проектов хранится локально в `~/.gemini/antigravity/archivist-state.json`. После включения анализа очищенный дайджест остаётся в `.archivist/.local/antigravity/` и передаётся отдельному процессу `agy` CLI вместе с релевантными знаниями. UI-панель работает локально через sidecar и не вызывает модель.
+- В Antigravity без анализа сохраняются только метаданные событий, идентификаторы хешируются; список зарегистрированных проектов хранится локально в `~/.gemini/antigravity/archivist-state.json`. После включения анализа очищенный дайджест остаётся в `.archivist/.local/antigravity/` и передаётся отдельному процессу `agy` CLI вместе с релевантными знаниями. UI-панель работает локально через MCP-сервер плагина и не вызывает модель.
 - Секреты (ключи API, токены, пароли в присваиваниях, приватные ключи, пароли в URL) маскируются в командах журнала, в материале для модели и в тексте записей. Запись, для которой понадобилось маскирование, уходит на ревью.
 - Записи с исчезнувшими доказательствами (файлы удалены или переименованы) помечаются в `INDEX.md` как stale и не попадают в правила, пока файл не вернётся или запись не обновят.
 
@@ -439,7 +439,7 @@ Antigravity всегда анализирует дайджест и отправ
 npm run check
 ```
 
-`check` запускает проверку типов в трёх конфигурациях: с Node для CLI и серверных адаптеров, в окружении мода Claude Code без Node по типам `types/claude-code/`, а также для GUI OpenCode с Solid и DOM. Затем идут тесты (vitest) и сборка всех пакетов, включая визуальную часть OpenCode и sidecar Antigravity. Валидация пакетов:
+`check` запускает проверку типов в четырёх конфигурациях: с Node для CLI и серверных адаптеров, в окружении мода Claude Code без Node по типам `types/claude-code/`, для GUI OpenCode с Solid и DOM, а также для клиентского MCP App UI Antigravity. Затем идут тесты (vitest) и сборка всех пакетов, включая визуальную часть OpenCode и MCP App Antigravity. Валидация пакетов:
 
 ```bash
 npm run validate
@@ -448,7 +448,7 @@ npm run validate:opencode
 npm run validate:antigravity
 ```
 
-`validate` проверяет плагин Claude Code, `validate:codex` — структуру пакета Codex и пути его hooks и skills, `validate:opencode` — серверную и визуальную части OpenCode, вспомогательный пакет интерфейса, CLI и skills, `validate:antigravity` — манифест, hooks, CLI, UI-sidecar и skills Antigravity. Живую доставку событий Codex и Antigravity проверяют после установки через `collection`, анализ Codex, OpenCode и Antigravity — через `analysis status` и панели.
+`validate` проверяет плагин Claude Code, `validate:codex` — структуру пакета Codex и пути его hooks и skills, `validate:opencode` — серверную и визуальную части OpenCode, вспомогательный пакет интерфейса, CLI и skills, `validate:antigravity` — манифест, hooks, CLI, MCP-сервер, self-contained HTML MCP App и skills Antigravity. Живую доставку событий Codex и Antigravity проверяют после установки через `collection`, анализ Codex, OpenCode и Antigravity — через `analysis status` и панели.
 
 Eval-кейсы Claude Code лежат в `plugin/evals/`:
 
@@ -481,12 +481,12 @@ src/analyzer/   сигналы, дайджест, промпты, разбор �
 src/adapters/claude/mod/register.ts   мод Claude Code: события → журнал → анализ → отчёт
 src/adapters/codex/   hooks Codex, сбор событий, очередь и анализ через Codex CLI
 src/adapters/opencode/   плагин V2: события, контекст, анализ, данные панели и GUI
-src/adapters/antigravity/   hooks Antigravity, реестр проектов, очередь и анализ через agy CLI, UI-sidecar
+src/adapters/antigravity/   hooks Antigravity, реестр проектов, очередь и анализ через agy CLI, MCP App сервер и UI
 src/cli/        CLI на Node
 plugin/         пакет Claude Code (манифест, hooks.json, register.js, bin/, skills/)
 plugin-codex/   пакет Codex (манифест, hooks.json, bin/, skills/)
 plugin-opencode/   пакет OpenCode 2.2.5 (package.json, index.js, bin/, skills/, ui/)
-plugin-antigravity/   пакет Antigravity (plugin.json, hooks.json, rules/, bin/, skills/, sidecars/)
+plugin-antigravity/   пакет Antigravity (plugin.json, mcp_config.json, hooks.json, rules/, bin/, ui/, skills/)
 .claude-plugin/marketplace.json   каталог маркетплейса Claude Code
 .agents/plugins/marketplace.json каталог маркетплейса Codex
 spikes/         код исследований этапа 0

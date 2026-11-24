@@ -1,36 +1,36 @@
 :root {
   color-scheme: light dark;
-  --bg: var(--background, #f6f7f9);
-  --surface: var(--card, #ffffff);
-  --surface-alt: var(--muted, #eef1f6);
-  --fg: var(--foreground, #1a2230);
-  --fg-muted: var(--muted-foreground, #647084);
-  --line: var(--border, #dce2ec);
-  --accent: var(--primary, #4f6bff);
+  --bg: var(--color-background-primary, #f6f7f9);
+  --surface: var(--color-background-secondary, #ffffff);
+  --surface-alt: var(--color-background-tertiary, #eef1f6);
+  --fg: var(--color-text-primary, #1a2230);
+  --fg-muted: var(--color-text-secondary, #647084);
+  --line: var(--color-border-primary, #dce2ec);
+  --accent: var(--color-ring-primary, #4f6bff);
   --accent-fg: #ffffff;
-  --ok: #18a572;
-  --warn: #d9822b;
-  --danger: #d94343;
+  --ok: var(--color-text-success, #18a572);
+  --warn: var(--color-text-warning, #d9822b);
+  --danger: var(--color-text-danger, #d94343);
 }
 
 :root[data-theme="dark"] {
-  --bg: var(--background, #13161b);
-  --surface: var(--card, #1b2028);
-  --surface-alt: var(--muted, #232a35);
-  --fg: var(--foreground, #e8ecf3);
-  --fg-muted: var(--muted-foreground, #9aa6ba);
-  --line: var(--border, #2e3746);
-  --accent: var(--primary, #6c84ff);
+  --bg: var(--color-background-primary, #13161b);
+  --surface: var(--color-background-secondary, #1b2028);
+  --surface-alt: var(--color-background-tertiary, #232a35);
+  --fg: var(--color-text-primary, #e8ecf3);
+  --fg-muted: var(--color-text-secondary, #9aa6ba);
+  --line: var(--color-border-primary, #2e3746);
+  --accent: var(--color-ring-primary, #6c84ff);
   --accent-fg: #ffffff;
-  --ok: #29c98f;
-  --warn: #f0a44b;
-  --danger: #ff7373;
+  --ok: var(--color-text-success, #29c98f);
+  --warn: var(--color-text-warning, #f0a44b);
+  --danger: var(--color-text-danger, #ff7373);
 }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; width: 100%; margin: 0; padding: 0; overflow-x: hidden; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
   font-size: 13px;
   line-height: 1.5;
   background: var(--bg);
@@ -46,6 +46,7 @@ body {
   flex-direction: column;
   width: 100%;
   max-width: 100%;
+  min-height: 100vh;
   height: 100vh;
   overflow: hidden;
 }

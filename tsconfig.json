@@ -24,6 +24,7 @@
   ],
   "exclude": [
     "src/adapters/claude/mod",
-    "src/adapters/opencode/gui.tsx"
+    "src/adapters/opencode/gui.tsx",
+    "src/adapters/antigravity/panel-ui"
   ]
 }

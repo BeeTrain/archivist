@@ -1,11 +1,11 @@
 # Archivist для Antigravity
 
-Нативный плагин **Archivist** для Google Antigravity с UI-панелью в правой вспомогательной панели (Auxiliary Pane), lifecycle hooks, навыками и полной поддержкой консольных команд. Использует общую базу `.archivist/` с версиями для Claude Code, Codex и OpenCode.
+Нативный плагин **Archivist** для Google Antigravity с UI-панелью на базе **MCP Apps** (открывается в правой вспомогательной панели, в левом сайдбаре и из чата), lifecycle hooks, навыками и полной поддержкой консольных команд. Использует общую базу `.archivist/` с версиями для Claude Code, Codex и OpenCode.
 
 ## Что входит в плагин
 
-- **UI-панель (`sidecars/archivist_panel/`)**:
-  - Нативная вкладка в правой панели Antigravity (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) с авто-синхронизацией светлой/тёмной темы.
+- **UI-панель MCP App (`mcp_config.json`, `bin/archivist-mcp`, `ui/panel.html`)**:
+  - Официальное MCP App (`ui://archivist/panel.html`) с точками входа `aux_pane` (правая панель) и `global` (левый сайдбар), авто-синхронизацией светлой/тёмной темы и хост-переменных Antigravity.
   - Переключение проектов и добавление пути к проекту, инициализация `.archivist/` в один клик.
   - Поиск и фильтрация записей по типам (`command`, `gotcha`, `decision`, `procedure`), добавление новых записей и вывод устаревших (`deprecate`).
   - Интерактивная очередь ревью: принятие (`apply`) и отклонение (`skip`) предложений прямо из UI с защитой по fingerprint.
@@ -33,6 +33,8 @@ npm run validate:antigravity
 ```bash
 ln -s /absolute/path/to/archivist/plugin-antigravity ~/.gemini/config/plugins/archivist
 ```
+
+После подключения пункт **Archivist** появится в меню правой панели (`aux_pane`) и в левом сайдбаре (`global`), а агент сможет открывать панель напрямую через MCP-инструмент `archivist_panel`.
 
 ## Консольные команды
 

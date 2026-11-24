@@ -11,8 +11,6 @@ Open the live Archivist side panel for the current project.
 node "<plugin-root>/bin/archivist" register
 ```
 
-2. Offer the one-click pill to open the panel in the right Auxiliary Pane:
-
-[Archivist](sidecar://archivist/archivist_panel/)
+2. Call the `archivist_panel` MCP tool (pass the current project root if known) to open the live Archivist MCP App panel. The user can also open **Archivist** anytime from the right side pane menu (`+` / new tab) or from the left sidebar.
 
 3. If the user specifically asks for a standalone browser URL in the terminal instead of the Antigravity side pane, mention `node "<plugin-root>/bin/archivist" panel`.

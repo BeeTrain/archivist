@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "panel": {
+      "command": "sh",
+      "args": ["${PLUGIN_ROOT}/bin/run-mcp.sh"]
+    }
+  }
+}

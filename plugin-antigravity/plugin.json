@@ -1,8 +1,8 @@
 {
   "name": "archivist",
   "displayName": "Archivist",
-  "version": "1.9.0",
-  "description": "Captures project knowledge (commands, gotchas, ADRs) from agent sessions and shows a live Auxiliary Pane UI for search, review queue, and reports.",
+  "version": "1.9.1",
+  "description": "Captures project knowledge (commands, gotchas, ADRs) from agent sessions and provides a live MCP App UI panel in the side pane and sidebar for search, review queue, and reports.",
   "logo": "assets/logo.svg",
   "repository": "https://github.com/BeeTrain/archivist",
   "suggestedPrompts": [

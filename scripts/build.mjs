@@ -2,7 +2,7 @@
 //   plugin/hooks/register.js — the Claude Code mod (no Node APIs; all I/O goes through `$`)
 //   plugin/bin/archivist     — the Node CLI (on the Bash tool's PATH while the plugin is enabled)
 import { build } from "esbuild";
-import { chmodSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { build as buildGui } from "vite";
 
 await build({
@@ -82,15 +82,38 @@ chmodSync("plugin-antigravity/bin/archivist", 0o755);
 chmodSync("plugin-antigravity/bin/run-hook.sh", 0o755);
 
 await build({
-  entryPoints: ["src/adapters/antigravity/sidecar.ts"],
-  outfile: "plugin-antigravity/sidecars/archivist_panel/main.mjs",
+  entryPoints: ["src/adapters/antigravity/mcp-entry.ts"],
+  outfile: "plugin-antigravity/bin/archivist-mcp",
   bundle: true,
   format: "esm",
   platform: "node",
   target: "node20",
-  external: ["sidecar_sdk"],
+  legalComments: "none",
+  banner: { js: "#!/usr/bin/env node" },
+});
+chmodSync("plugin-antigravity/bin/archivist-mcp", 0o755);
+chmodSync("plugin-antigravity/bin/run-mcp.sh", 0o755);
+
+const panelBundle = await build({
+  entryPoints: ["src/adapters/antigravity/panel-ui/panel.ts"],
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "es2022",
+  minify: true,
+  write: false,
   legalComments: "none",
 });
+const panelJs = panelBundle.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
+const panelCss = readFileSync("src/adapters/antigravity/panel-ui/panel.css", "utf8");
+const panelTemplate = readFileSync("src/adapters/antigravity/panel-ui/panel.html", "utf8");
+const panelHtml = panelTemplate
+  .replace("/*__ARCHIVIST_CSS__*/", () => panelCss)
+  .replace("/*__ARCHIVIST_JS__*/", () => panelJs);
+mkdirSync("plugin-antigravity/ui", { recursive: true });
+writeFileSync("plugin-antigravity/ui/panel.html", panelHtml, "utf8");
 
-console.log("built plugin-codex/bin/archivist, plugin-opencode/index.js, plugin-opencode/bin/archivist, plugin-antigravity/bin/archivist, plugin-antigravity/sidecars/archivist_panel/main.mjs");
+console.log(
+  "built plugin-codex/bin/archivist, plugin-opencode/index.js, plugin-opencode/bin/archivist, plugin-antigravity/bin/archivist, plugin-antigravity/bin/archivist-mcp, plugin-antigravity/ui/panel.html",
+);
 await buildGui();

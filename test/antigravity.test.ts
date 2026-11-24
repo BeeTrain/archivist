@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { capture, collectionSummary, handleHook } from "../src/adapters/antigravity/hooks.js";
 import { parseAgyReply } from "../src/adapters/antigravity/llm.js";
+import { handleMcpMessage, PANEL_MIME_TYPE, PANEL_RESOURCE_URI } from "../src/adapters/antigravity/mcp.js";
 import { analysisStatus, captureTask, processTask } from "../src/adapters/antigravity/queue.js";
 import {
   uiAdd,
@@ -244,6 +245,57 @@ describe("Antigravity adapter", () => {
 
       const collOut = await execFileAsync(process.execPath, [cli, "collection", "--root", root], { env });
       expect(JSON.parse(collOut.stdout).events).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes an Antigravity MCP App server with aux_pane and global entrypoints", async () => {
+    const root = await mkdtemp(join(tmpdir(), "archivist-agy-mcp-"));
+    try {
+      await writeFile(join(root, "package.json"), JSON.stringify({ name: "mcp-demo", scripts: { test: "vitest" } }));
+      const init = await handleMcpMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } });
+      expect((init?.result as { capabilities?: { tools?: unknown; resources?: unknown } })?.capabilities?.resources).toBeTruthy();
+
+      const resList = await handleMcpMessage({ jsonrpc: "2.0", id: 2, method: "resources/list" });
+      const resources = (resList?.result as { resources: { uri: string; mimeType: string }[] }).resources;
+      expect(resources[0]?.uri).toBe(PANEL_RESOURCE_URI);
+      expect(resources[0]?.mimeType).toBe(PANEL_MIME_TYPE);
+
+      const resRead = await handleMcpMessage(
+        { jsonrpc: "2.0", id: 3, method: "resources/read", params: { uri: PANEL_RESOURCE_URI } },
+        () => "<!DOCTYPE html><html><body>Archivist</body></html>",
+      );
+      const content = (resRead?.result as { contents: { mimeType: string; text: string }[] }).contents[0];
+      expect(content?.mimeType).toBe(PANEL_MIME_TYPE);
+      expect(content?.text).toContain("Archivist");
+
+      const toolsList = await handleMcpMessage({ jsonrpc: "2.0", id: 4, method: "tools/list" });
+      const tools = (toolsList?.result as { tools: { name: string; _meta?: Record<string, unknown> }[] }).tools;
+      const panelTool = tools.find((t) => t.name === "archivist_panel");
+      expect((panelTool?._meta?.ui as { resourceUri?: string })?.resourceUri).toBe(PANEL_RESOURCE_URI);
+      const entrypoints = ((panelTool?._meta?.["com.google.antigravity/ui"] as { entrypoints?: { type: string }[] })?.entrypoints ?? []).map(
+        (e) => e.type,
+      );
+      expect(entrypoints).toEqual(["aux_pane", "global"]);
+
+      const initCall = await handleMcpMessage({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "panel_init", arguments: { root } },
+      });
+      expect((initCall?.result as { isError?: boolean; structuredContent?: { ok?: boolean } })?.isError).toBeFalsy();
+
+      const openCall = await handleMcpMessage({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/call",
+        params: { name: "archivist_panel", arguments: {} },
+      });
+      const openRes = openCall?.result as { structuredContent?: { root?: string; initialized?: boolean } };
+      expect(openRes.structuredContent?.root).toBe(root);
+      expect(openRes.structuredContent?.initialized).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
