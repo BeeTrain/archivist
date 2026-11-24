@@ -67,5 +67,30 @@ await build({
   banner: { js: "#!/usr/bin/env node" },
 });
 chmodSync("plugin-opencode/bin/archivist", 0o755);
-console.log("built plugin-codex/bin/archivist, plugin-opencode/index.js, plugin-opencode/bin/archivist");
+
+await build({
+  entryPoints: ["src/adapters/antigravity/entry.ts"],
+  outfile: "plugin-antigravity/bin/archivist",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node20",
+  legalComments: "none",
+  banner: { js: "#!/usr/bin/env node" },
+});
+chmodSync("plugin-antigravity/bin/archivist", 0o755);
+chmodSync("plugin-antigravity/bin/run-hook.sh", 0o755);
+
+await build({
+  entryPoints: ["src/adapters/antigravity/sidecar.ts"],
+  outfile: "plugin-antigravity/sidecars/archivist_panel/main.mjs",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node20",
+  external: ["sidecar_sdk"],
+  legalComments: "none",
+});
+
+console.log("built plugin-codex/bin/archivist, plugin-opencode/index.js, plugin-opencode/bin/archivist, plugin-antigravity/bin/archivist, plugin-antigravity/sidecars/archivist_panel/main.mjs");
 await buildGui();

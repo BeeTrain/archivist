@@ -15,6 +15,13 @@ export interface Config {
     timeoutSeconds: number;
     maxCallsPerDay: number;
   };
+  antigravity: {
+    enabled: boolean;
+    model: string;
+    cliPath: string;
+    timeoutSeconds: number;
+    maxCallsPerDay: number;
+  };
   /** Language of recorded entries: "auto" follows the user's prompts; otherwise a name such as "Russian" or "English". */
   language: string;
   analyzer: {
@@ -88,6 +95,7 @@ export const DEFAULT_CONFIG: Config = {
   enabled: true,
   codex: { enabled: false, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   opencode: { enabled: true, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
+  antigravity: { enabled: false, model: "", cliPath: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   language: "auto",
   analyzer: {
     idleSeconds: 90,

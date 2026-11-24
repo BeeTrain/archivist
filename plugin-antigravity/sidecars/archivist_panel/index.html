@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Archivist</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="header">
+      <div class="header-top">
+        <div class="brand">
+          <span class="brand-icon" aria-hidden="true">📚</span>
+          <div>
+            <h1>Archivist</h1>
+            <div id="project-path" class="subtle truncate">Подключение…</div>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button type="button" id="btn-add-project" class="btn btn-ghost btn-sm" title="Добавить папку проекта">+ Проект</button>
+          <button type="button" id="btn-refresh" class="btn btn-ghost btn-sm" title="Обновить данные">↻</button>
+        </div>
+      </div>
+
+      <div class="project-bar">
+        <select id="project-select" class="select" aria-label="Выбор проекта"></select>
+      </div>
+
+      <form id="project-form" class="inline-form hidden">
+        <input id="project-input" class="input" type="text" placeholder="/абсолютный/путь/к/проекту" autocomplete="off">
+        <button type="submit" class="btn btn-primary btn-sm">Открыть</button>
+        <button type="button" id="project-cancel" class="btn btn-ghost btn-sm">✕</button>
+      </form>
+
+      <div id="status-card" class="status-card">
+        <div class="status-row">
+          <div class="status-left">
+            <span id="status-dot" class="dot"></span>
+            <strong id="analysis-label">Загрузка…</strong>
+          </div>
+          <div class="status-actions">
+            <button type="button" id="btn-toggle-analysis" class="btn btn-ghost btn-xs hidden">Включить анализ</button>
+            <button type="button" id="btn-run-analysis" class="btn btn-ghost btn-xs hidden" title="Проверить очередь анализа">Запустить</button>
+          </div>
+        </div>
+        <div id="analysis-sub" class="subtle"></div>
+      </div>
+
+      <nav class="tabs" role="tablist" aria-label="Разделы Archivist">
+        <button type="button" role="tab" data-tab="entries" aria-selected="true" class="tab active">
+          Записи <span id="count-entries" class="badge">0</span>
+        </button>
+        <button type="button" role="tab" data-tab="proposals" aria-selected="false" class="tab">
+          Ревью <span id="count-review" class="badge">0</span>
+        </button>
+        <button type="button" role="tab" data-tab="reports" aria-selected="false" class="tab">
+          Отчёты <span id="count-reports" class="badge">0</span>
+        </button>
+        <button type="button" role="tab" data-tab="tools" aria-selected="false" class="tab">
+          Консоль
+        </button>
+      </nav>
+    </header>
+
+    <main class="main">
+      <section id="empty-project" class="empty-box hidden">
+        <p class="empty-title">Проект не выбран</p>
+        <p class="subtle">Откройте любой чат в проекте с включённым плагином или нажмите «+ Проект» выше и укажите путь к репозиторию.</p>
+      </section>
+
+      <section id="uninitialized-box" class="empty-box hidden">
+        <p class="empty-title">В этом проекте ещё нет <code>.archivist/</code></p>
+        <p class="subtle">Инициализация создаст базу знаний и автоматически считает команды сборки, тестов и линта из манифестов проекта.</p>
+        <button type="button" id="btn-init" class="btn btn-primary">Инициализировать .archivist/</button>
+      </section>
+
+      <!-- Tab: Entries -->
+      <section id="tab-entries" class="tab-panel">
+        <div class="toolbar">
+          <input id="search" class="input" type="search" placeholder="Поиск по заголовкам, тексту, путям…">
+          <button type="button" id="btn-toggle-add" class="btn btn-primary btn-sm">+ Запись</button>
+        </div>
+
+        <div class="chips" role="group" aria-label="Фильтр по типу">
+          <button type="button" class="chip active" data-type="">Все</button>
+          <button type="button" class="chip" data-type="command">Команды</button>
+          <button type="button" class="chip" data-type="gotcha">Ловушки</button>
+          <button type="button" class="chip" data-type="decision">Решения</button>
+          <button type="button" class="chip" data-type="procedure">Процедуры</button>
+        </div>
+
+        <form id="add-form" class="card form-card hidden">
+          <div class="form-row">
+            <label class="label">Тип
+              <select id="add-type" class="select">
+                <option value="command">Команда (command)</option>
+                <option value="gotcha">Ловушка (gotcha)</option>
+                <option value="decision">Решение / ADR (decision)</option>
+                <option value="procedure">Процедура (procedure)</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-row">
+            <label class="label">Заголовок
+              <input id="add-title" class="input" type="text" required placeholder="Например: Запуск тестов">
+            </label>
+          </div>
+          <div class="form-row">
+            <label class="label">Содержание
+              <textarea id="add-content" class="textarea" rows="3" required placeholder="Точная команда или правило…"></textarea>
+            </label>
+          </div>
+          <div class="form-row" id="add-rationale-row">
+            <label class="label">Причина (обязательно для decision)
+              <textarea id="add-rationale" class="textarea" rows="2" placeholder="Почему выбрали этот вариант и что отвергли…"></textarea>
+            </label>
+          </div>
+          <div class="form-row">
+            <label class="label">Пути (опционально, через запятую)
+              <input id="add-paths" class="input" type="text" placeholder="src/api/**, scripts/**">
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+            <button type="button" id="add-cancel" class="btn btn-ghost btn-sm">Отмена</button>
+          </div>
+        </form>
+
+        <div id="entries-list" class="list"></div>
+      </section>
+
+      <!-- Tab: Review Proposals -->
+      <section id="tab-proposals" class="tab-panel hidden">
+        <div id="proposals-list" class="list"></div>
+      </section>
+
+      <!-- Tab: Reports -->
+      <section id="tab-reports" class="tab-panel hidden">
+        <div class="toolbar">
+          <select id="report-select" class="select" aria-label="Выбор отчёта"></select>
+        </div>
+        <pre id="report-body" class="report-pre">Отчётов пока нет.</pre>
+      </section>
+
+      <!-- Tab: Console & Diagnostics -->
+      <section id="tab-tools" class="tab-panel hidden">
+        <div class="card">
+          <h3>Сбор событий Antigravity</h3>
+          <div id="collection-stats" class="kv-grid"></div>
+        </div>
+
+        <div class="card">
+          <h3>Обслуживание базы</h3>
+          <div class="action-row">
+            <button type="button" id="btn-render" class="btn btn-ghost btn-sm">Перегенерировать правила (render)</button>
+            <button type="button" id="btn-lint" class="btn btn-ghost btn-sm">Проверить базу (lint)</button>
+          </div>
+          <pre id="maint-output" class="report-pre hidden"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Консольные команды</h3>
+          <p class="subtle">Все команды работают через бинарник плагина и общую базу <code>.archivist/</code>:</p>
+          <pre id="cli-cheatsheet" class="report-pre"></pre>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

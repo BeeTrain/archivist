@@ -1,0 +1,13 @@
+{
+  "name": "archivist",
+  "displayName": "Archivist",
+  "version": "1.9.0",
+  "description": "Captures project knowledge (commands, gotchas, ADRs) from agent sessions and shows a live Auxiliary Pane UI for search, review queue, and reports.",
+  "logo": "assets/logo.svg",
+  "repository": "https://github.com/BeeTrain/archivist",
+  "suggestedPrompts": [
+    "Открой панель Archivist и покажи знания этого проекта",
+    "Инициализируй Archivist в текущем проекте",
+    "Разбери предложения Archivist на ревью"
+  ]
+}

@@ -21,7 +21,7 @@ const proposalView = (proposal: Proposal, entries: Map<string, Entry>): UiSnapsh
     title: op.op === "add" ? op.title : op.op === "update" ? op.title ?? existing?.title ?? op.id : existing?.title ?? op.id,
     content: op.op === "add" ? op.content : op.op === "update" ? op.content ?? existing?.content ?? "" : op.op === "deprecate" ? op.reason : "Запись снова подтвердилась при работе над задачей.",
     ...(op.op === "add" && op.rationale ? { rationale: op.rationale } : {}),
-    reason: proposal.reason?.replace(/^(?:codex|opencode|adapter): review required$/i, "Ожидает проверки").replaceAll("evidence file not found:", "Не найден подтверждающий файл:") ?? null,
+    reason: proposal.reason?.replace(/^(?:codex|opencode|antigravity|adapter): review required$/i, "Ожидает проверки").replaceAll("evidence file not found:", "Не найден подтверждающий файл:") ?? null,
   };
 };
 

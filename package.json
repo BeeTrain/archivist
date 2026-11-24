@@ -1,6 +1,6 @@
 {
   "name": "archivist",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Captures project knowledge from coding-agent sessions and turns it into docs that save time, tokens and context next time",
   "private": true,
   "type": "module",
@@ -14,7 +14,8 @@
     "validate": "claude plugin validate plugin",
     "check": "npm run typecheck && npm test && npm run build",
     "validate:codex": "node scripts/validate-codex.mjs",
-    "validate:opencode": "node scripts/validate-opencode.mjs"
+    "validate:opencode": "node scripts/validate-opencode.mjs",
+    "validate:antigravity": "node scripts/validate-antigravity.mjs"
   },
   "devDependencies": {
     "@opencode/plugin": "2.2.5",

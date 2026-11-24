@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.0 — 2026-11-24
+
+- Добавлен нативный пакет Archivist для **Google Antigravity** (`plugin-antigravity/`): общая база знаний `.archivist/`, правила `.archivist/antigravity/rules/`, навыки (`archivist-setup`, `archivist-panel`, `archivist-recall`, `archivist-remember`, `archivist-decide`, `archivist-triage`, `archivist-collection`) и CLI с поддержкой `--target antigravity`.
+- Встроенная UI-панель (`sidecars/archivist_panel/`) открывается в правой вспомогательной панели Antigravity (Auxiliary Pane): переключение проектов, инициализация `.archivist/`, поиск и фильтрация записей, добавление и вывод из правил, интерактивное принятие/отклонение предложений ревью с защитой по fingerprint, просмотр отчётов, статистика сбора и обслуживание (`render`, `lint`).
+- Lifecycle hooks (`SessionStart`, `PreInvocation`, `PostToolUse`, `Stop`) регистрируют активный проект для панели, подставляют `core.md` в начало сессии через `injectSteps` и собирают очищенные метаданные в `.archivist/.local/antigravity/`.
+- Добавлен включаемый для проекта фоновый анализ Antigravity через `agy` CLI (`--output-format json --disable-slash-commands --json-schema ... -p ...`); все изменения поступают на ревью. По умолчанию анализ выключен и управляется через панель или `analysis enable|disable|status|run`.
+- Обновлены README, `.gitignore`, валидатор `npm run validate:antigravity` и CI.
+
 ## 1.8.0 — 2026-11-06
 
 - Память для Claude Code выбирается в настройках плагина (`/config`): `auto` находит подключённый OpenViking, как раньше, `openviking` ждёт именно его, `mem0` использует адрес и ключ mem0, `off` оставляет записи только в файлах проекта. Настройки личные: каждый в команде выбирает свою память, и в git они не попадают.

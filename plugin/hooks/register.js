@@ -1,7 +1,7 @@
 // src/core/io.ts
 var targetPaths = (target = "claude") => ({
   rules: target === "claude" ? ".claude/rules/archivist" : `.archivist/${target}/rules`,
-  skills: target === "claude" ? ".claude/skills" : target === "codex" ? ".agents/skills" : ".opencode/skills"
+  skills: target === "claude" ? ".claude/skills" : target === "opencode" ? ".opencode/skills" : ".agents/skills"
 });
 var PATHS = {
   dir: ".archivist",
@@ -47,6 +47,7 @@ var DEFAULT_CONFIG = {
   enabled: true,
   codex: { enabled: false, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   opencode: { enabled: true, model: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
+  antigravity: { enabled: false, model: "", cliPath: "", timeoutSeconds: 120, maxCallsPerDay: 20 },
   language: "auto",
   analyzer: {
     idleSeconds: 90,

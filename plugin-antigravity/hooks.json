@@ -1,0 +1,37 @@
+{
+  "archivist": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "./bin/run-hook.sh",
+        "timeout": 15
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "./bin/run-hook.sh",
+        "timeout": 10
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/run-hook.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./bin/run-hook.sh",
+        "timeout": 15
+      }
+    ]
+  }
+}

@@ -1,11 +1,11 @@
 // The only way the core touches the outside world. The Claude Code mod implements it on `$.fs`,
 // the CLI on `node:fs`, tests in memory.
 
-export type Target = "claude" | "codex" | "opencode";
+export type Target = "claude" | "codex" | "opencode" | "antigravity";
 
 export const targetPaths = (target: Target = "claude") => ({
   rules: target === "claude" ? ".claude/rules/archivist" : `.archivist/${target}/rules`,
-  skills: target === "claude" ? ".claude/skills" : target === "codex" ? ".agents/skills" : ".opencode/skills",
+  skills: target === "claude" ? ".claude/skills" : target === "opencode" ? ".opencode/skills" : ".agents/skills",
 });
 
 export interface Io {
