@@ -24,8 +24,12 @@ const FACTS_FOR_RECALL = 5;
 const SEARCH_TIMEOUT_MS = 20_000;
 
 const MASK = "[redacted]";
-const CREDENTIAL_NEAR_ITS_NAME =
-  /(?<![\p{L}\p{N}_])(?:pass(?:word|wd|phrase)|secret|token|bearer|api[ _-]?key|access[ _-]?key|парол\p{L}*|токен\p{L}*|секрет\p{L}*|ключ\p{L}*)(?:\s+\p{L}+){0,2}[\s:=]+["']?\S*[\d!@#$%^&*]\S*/giu;
+const CREDENTIAL_NAME = /(?<![\p{L}\p{N}_])(?:pass(?:word|wd|phrase)|secret|token|bearer|api[ _-]?key|access[ _-]?key|парол\p{L}*|токен\p{L}*|секрет\p{L}*|ключ\p{L}*)(?![\p{L}\p{N}_])/u.source;
+const EXPLICIT_CREDENTIAL_VALUE = new RegExp(
+  String.raw`(${CREDENTIAL_NAME}(?:\s+\p{L}+){0,3}?(?:\s+is\s+|\s*[:=—–]\s*))(?:"[^"]+"|'[^']+'|“[^”]+”|«[^»]+»|\x60[^\x60]+\x60|\S+)`,
+  "giu",
+);
+const CREDENTIAL_NEAR_ITS_NAME = new RegExp(String.raw`${CREDENTIAL_NAME}(?:\s+\p{L}+){0,2}[\s:=]+["']?\S*[\d!@#$%^&*]\S*`, "giu");
 const LONG_RUN = /\S{20,}/g;
 const OUTSIDE_THE_PROJECT = /^(\/|~|[A-Za-z]:[\\/])/;
 
@@ -35,7 +39,8 @@ const cleanLine = (text: string, max: number): string => truncate(redact(oneLine
 
 const withoutCredentials = (text: string): string =>
   redact(text)
-    .text.replace(CREDENTIAL_NEAR_ITS_NAME, MASK)
+    .text.replace(EXPLICIT_CREDENTIAL_VALUE, "$1" + MASK)
+    .replace(CREDENTIAL_NEAR_ITS_NAME, MASK)
     .replace(LONG_RUN, (run) => (/\p{L}/u.test(run) && /\d/.test(run) ? MASK : run));
 
 export const memoryQuery = (prompt: string | undefined, edits: string[]): string => {

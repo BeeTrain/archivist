@@ -140,6 +140,25 @@ describe("searching OpenViking", () => {
     expect((await store.search!("x", "all")).map((hit) => hit.text)).toEqual(["Strong", "Fair", "Weak"]);
   });
 
+  it("reads OpenViking 0.5.6 hits with empty and populated tags", async () => {
+    const { store } = server({
+      find: answer(
+        "Found 2 item(s):",
+        "",
+        '- [resource 82%] viking://resources/notes/release.md tags=["topic=release", "origin=manual"]',
+        "    Release from main only.",
+        `- [resource 95%] ${base}cmd-1.md tags=[]`,
+        "    Run the full check.",
+        "",
+        "Use the read tool to expand a URI.",
+      ),
+    });
+    expect(await store.search!("release", "shared")).toEqual([
+      { ref: `${base}cmd-1.md`, text: "Run the full check.", archivist: { project, id: "cmd-1" } },
+      { ref: "viking://resources/notes/release.md", text: "Release from main only." },
+    ]);
+  });
+
   it("knows an Archivist item of any project by its address", async () => {
     const { store } = server({
       find: answer("Found 2 item(s):", "", `- [resource 90%] ${base}gk-1.md`, "    One", "- [resource 80%] viking://resources/archivist/local/tools/cmd-2.md", "    Two"),

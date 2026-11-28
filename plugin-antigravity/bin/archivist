@@ -715,7 +715,7 @@ var init_memory_choice = __esm({
 });
 
 // src/core/memory-search.ts
-var QUERY_PROMPT_CHARS, FILES_IN_QUERY, FACT_CHARS, SOURCE_CHARS, FACTS_FOR_CURATOR, MASK2, CREDENTIAL_NEAR_ITS_NAME, LONG_RUN, OUTSIDE_THE_PROJECT, oneLine2, cleanLine, withoutCredentials, memoryQuery, factOf, factLine, inThisLedger, changedSince, factsForCurator, factsForTask;
+var QUERY_PROMPT_CHARS, FILES_IN_QUERY, FACT_CHARS, SOURCE_CHARS, FACTS_FOR_CURATOR, MASK2, CREDENTIAL_NAME, EXPLICIT_CREDENTIAL_VALUE, CREDENTIAL_NEAR_ITS_NAME, LONG_RUN, OUTSIDE_THE_PROJECT, oneLine2, cleanLine, withoutCredentials, memoryQuery, factOf, factLine, inThisLedger, changedSince, factsForCurator, factsForTask;
 var init_memory_search = __esm({
   "src/core/memory-search.ts"() {
     "use strict";
@@ -729,12 +729,17 @@ var init_memory_search = __esm({
     SOURCE_CHARS = 200;
     FACTS_FOR_CURATOR = 8;
     MASK2 = "[redacted]";
-    CREDENTIAL_NEAR_ITS_NAME = new RegExp(`(?<![\\p{L}\\p{N}_])(?:pass(?:word|wd|phrase)|secret|token|bearer|api[ _-]?key|access[ _-]?key|\u043F\u0430\u0440\u043E\u043B\\p{L}*|\u0442\u043E\u043A\u0435\u043D\\p{L}*|\u0441\u0435\u043A\u0440\u0435\u0442\\p{L}*|\u043A\u043B\u044E\u0447\\p{L}*)(?:\\s+\\p{L}+){0,2}[\\s:=]+["']?\\S*[\\d!@#$%^&*]\\S*`, "giu");
+    CREDENTIAL_NAME = new RegExp("(?<![\\p{L}\\p{N}_])(?:pass(?:word|wd|phrase)|secret|token|bearer|api[ _-]?key|access[ _-]?key|\u043F\u0430\u0440\u043E\u043B\\p{L}*|\u0442\u043E\u043A\u0435\u043D\\p{L}*|\u0441\u0435\u043A\u0440\u0435\u0442\\p{L}*|\u043A\u043B\u044E\u0447\\p{L}*)(?![\\p{L}\\p{N}_])", "u").source;
+    EXPLICIT_CREDENTIAL_VALUE = new RegExp(
+      String.raw`(${CREDENTIAL_NAME}(?:\s+\p{L}+){0,3}?(?:\s+is\s+|\s*[:=—–]\s*))(?:"[^"]+"|'[^']+'|“[^”]+”|«[^»]+»|\x60[^\x60]+\x60|\S+)`,
+      "giu"
+    );
+    CREDENTIAL_NEAR_ITS_NAME = new RegExp(String.raw`${CREDENTIAL_NAME}(?:\s+\p{L}+){0,2}[\s:=]+["']?\S*[\d!@#$%^&*]\S*`, "giu");
     LONG_RUN = /\S{20,}/g;
     OUTSIDE_THE_PROJECT = /^(\/|~|[A-Za-z]:[\\/])/;
     oneLine2 = (text) => text.replace(/\s+/g, " ").trim();
     cleanLine = (text, max) => truncate(redact(oneLine2(text)).text, max);
-    withoutCredentials = (text) => redact(text).text.replace(CREDENTIAL_NEAR_ITS_NAME, MASK2).replace(LONG_RUN, (run) => new RegExp("\\p{L}", "u").test(run) && /\d/.test(run) ? MASK2 : run);
+    withoutCredentials = (text) => redact(text).text.replace(EXPLICIT_CREDENTIAL_VALUE, "$1" + MASK2).replace(CREDENTIAL_NEAR_ITS_NAME, MASK2).replace(LONG_RUN, (run) => new RegExp("\\p{L}", "u").test(run) && /\d/.test(run) ? MASK2 : run);
     memoryQuery = (prompt, edits) => {
       const files = edits.filter((file) => !OUTSIDE_THE_PROJECT.test(file)).slice(0, FILES_IN_QUERY);
       return [truncate(withoutCredentials(oneLine2(prompt ?? "")), QUERY_PROMPT_CHARS), ...files.map((file) => cleanLine(file, SOURCE_CHARS))].join(" ").trim();
@@ -895,7 +900,7 @@ var init_args = __esm({
 });
 
 // src/core/validate.ts
-var PROCEDURE_CHARS, DUP_ENTRY, PARAPHRASE, DUP_DOC, DOC_COVERAGE, IN_THE_NOTES, NOT_IN_NOTES, codeSpans, supportedBy, family, findDuplicate, sameFact, docWindows, clamp01, docParagraphs, validateOps;
+var PROCEDURE_CHARS, DUP_ENTRY, PARAPHRASE, DUP_DOC, DOC_COVERAGE, IN_THE_NOTES, NOT_IN_NOTES, RETIREMENT_REVIEW, codeSpans, supportedBy, family, findDuplicate, sameFact, docWindows, clamp01, docParagraphs, validateOps;
 var init_validate = __esm({
   "src/core/validate.ts"() {
     "use strict";
@@ -910,6 +915,7 @@ var init_validate = __esm({
     DOC_COVERAGE = 0.6;
     IN_THE_NOTES = 0.5;
     NOT_IN_NOTES = "not in the task's notes";
+    RETIREMENT_REVIEW = "retiring an entry requires review when external memory was shown";
     codeSpans = (text) => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1].replace(/\s+/g, " ").trim()).filter((c) => c.length >= 3);
     supportedBy = (text, source) => {
       const flat = source.replace(/\s+/g, " ");
@@ -953,7 +959,9 @@ var init_validate = __esm({
         return e && e.status === "active" ? e : void 0;
       };
       const route = (confidence, type) => confidence >= config.apply.autoConfidence && config.apply.autoTypes.includes(type) ? "apply" : "propose";
-      const groundless = (text) => args.groundedIn !== void 0 && !supportedBy(text, args.groundedIn);
+      const grounding = args.groundedIn;
+      const memoryWasShown = grounding !== void 0;
+      const groundless = (text) => memoryWasShown && !supportedBy(text, grounding);
       for (const raw of ops) {
         const op = raw;
         if (!op || typeof op !== "object" || !("op" in op)) {
@@ -1036,6 +1044,8 @@ var init_validate = __esm({
             notes.push("decision without rationale");
           }
           const supersedes = (op.supersedes ?? []).filter((id2) => active(id2));
+          const retirementNeedsReview = memoryWasShown && supersedes.length > 0;
+          if (retirementNeedsReview) notes.push(RETIREMENT_REVIEW);
           const id = newId(op.type, taken);
           taken.add(id);
           const entry = {
@@ -1056,14 +1066,15 @@ var init_validate = __esm({
             ...op.savings && (op.savings.toolCalls || op.savings.tokens) ? { savings: { toolCalls: Number(op.savings.toolCalls) || 0, tokens: Number(op.savings.tokens) || 0 } } : {},
             reinforced: 0
           };
-          const earlier = route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket && !unsupported ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title2} ${content}`)) : void 0;
+          const autoApply = !retirementNeedsReview && route(entry.confidence, op.type) === "apply";
+          const earlier = !autoApply && !retirementNeedsReview && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket && !unsupported ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title2} ${content}`)) : void 0;
           if (earlier) {
             entry.confidence = Math.max(entry.confidence, config.apply.autoConfidence);
             notes.push("proposed again in a later task");
             out.promoted.push(earlier.id);
           }
           const o = { op, id, type: op.type, title: title2, ...notes.length ? { reason: notes.join("; ") } : {} };
-          if (earlier || route(entry.confidence, op.type) === "apply") {
+          if (earlier || autoApply) {
             if (op.type === "decision") adr++;
             out.records.push({ v: 1, ts: now2, op: "add", entry, src });
             out.applied.push(o);
@@ -1100,8 +1111,8 @@ var init_validate = __esm({
             out.applied.push(base);
           } else out.proposals.push(base);
         } else if (op.op === "deprecate") {
-          if (groundless(String(op.reason ?? ""))) {
-            out.proposals.push({ ...base, reason: `${op.reason}; ${NOT_IN_NOTES}` });
+          if (memoryWasShown) {
+            out.proposals.push({ ...base, reason: [op.reason, RETIREMENT_REVIEW].filter(Boolean).join("; ") });
           } else if (clamp01(op.confidence) >= Math.max(0.9, config.apply.autoConfidence) && config.apply.autoTypes.includes(target2.type)) {
             out.records.push({ v: 1, ts: now2, op: "deprecate", id: target2.id, reason: String(op.reason ?? ""), src });
             out.applied.push({ ...base, reason: op.reason });
@@ -1162,7 +1173,7 @@ var init_review = __esm({
       const keys = new Set(which.split(/[\s,]+/).filter(Boolean));
       return proposals.filter((p) => keys.has(String(p.n)) || keys.has(p.id));
     };
-    needsHuman = (op) => op.op === "deprecate" || op.op === "add" && op.type === "decision";
+    needsHuman = (op) => op.op === "deprecate" || op.op === "add" && (op.type === "decision" || Boolean(op.supersedes?.length));
     reviewJson = (proposals) => JSON.stringify(proposals.map((p) => ({ id: p.id, n: p.n, ts: p.ts, human: needsHuman(p.op), reason: p.reason, op: p.op })), null, 1);
     asUser = (config) => ({ ...config, apply: { autoConfidence: 0, autoTypes: [...ENTRY_TYPES] } });
     record = async (io, config, ops, now2, src) => {

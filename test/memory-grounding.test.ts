@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProposedOp } from "../src/core/types.js";
+import { needsHuman } from "../src/core/review.js";
 import { validateOps } from "../src/core/validate.js";
 import { config, entry, memoryIo } from "./helpers.js";
 
@@ -59,13 +60,22 @@ describe("what the curator saw in memory", () => {
     expect(applied.applied.map((o) => o.id)).toEqual(["gk-1"]);
   });
 
-  it("holds back a deprecation the notes do not support, and lets one through that they do", async () => {
-    const held = await validated([{ op: "deprecate", id: "gk-1", reason: "The team moved to another provider last spring", confidence: 0.95 }]);
+  it("requires review for a deprecation when memory was shown and preserves the behavior without it", async () => {
+    const op: ProposedOp = { op: "deprecate", id: "gk-1", reason: "CI compares the bundles no longer", confidence: 0.95 };
+    const held = await validated([op]);
     expect(held.records).toEqual([]);
-    expect(held.proposals).toMatchObject([{ id: "gk-1" }]);
-    expect(held.proposals[0]!.reason).toContain(reason);
-    const applied = await validated([{ op: "deprecate", id: "gk-1", reason: "CI compares the bundles no longer", confidence: 0.95 }]);
+    expect(held.proposals).toMatchObject([{ id: "gk-1", op }]);
+    const applied = await validated([op], {});
     expect(applied.applied.map((o) => o.id)).toEqual(["gk-1"]);
+  });
+
+  it.each([0.6, 0.95])("requires review for a superseding add with confidence %s, even on repeat", async (confidence) => {
+    const op: ProposedOp = { ...fromNotes, supersedes: [bundles.id], confidence };
+    const held = await validated([op], { groundedIn: notes, pending: [{ id: "first", op }] });
+    expect(held.records).toEqual([]);
+    expect(held.promoted).toEqual([]);
+    expect(held.proposals).toMatchObject([{ op }]);
+    expect(needsHuman(held.proposals[0]!.op)).toBe(true);
   });
 
   it("still lets a reinforcement through: it adds no text", async () => {

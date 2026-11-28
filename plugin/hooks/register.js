@@ -651,6 +651,7 @@ var DUP_DOC = 0.6;
 var DOC_COVERAGE = 0.6;
 var IN_THE_NOTES = 0.5;
 var NOT_IN_NOTES = "not in the task's notes";
+var RETIREMENT_REVIEW = "retiring an entry requires review when external memory was shown";
 var codeSpans = (text) => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1].replace(/\s+/g, " ").trim()).filter((c) => c.length >= 3);
 var supportedBy = (text, source) => {
   const flat = source.replace(/\s+/g, " ");
@@ -694,7 +695,9 @@ var validateOps = async (args) => {
     return e && e.status === "active" ? e : void 0;
   };
   const route = (confidence, type) => confidence >= config.apply.autoConfidence && config.apply.autoTypes.includes(type) ? "apply" : "propose";
-  const groundless = (text) => args.groundedIn !== void 0 && !supportedBy(text, args.groundedIn);
+  const grounding = args.groundedIn;
+  const memoryWasShown = grounding !== void 0;
+  const groundless = (text) => memoryWasShown && !supportedBy(text, grounding);
   for (const raw of ops) {
     const op = raw;
     if (!op || typeof op !== "object" || !("op" in op)) {
@@ -777,6 +780,8 @@ var validateOps = async (args) => {
         notes.push("decision without rationale");
       }
       const supersedes = (op.supersedes ?? []).filter((id2) => active(id2));
+      const retirementNeedsReview = memoryWasShown && supersedes.length > 0;
+      if (retirementNeedsReview) notes.push(RETIREMENT_REVIEW);
       const id = newId(op.type, taken);
       taken.add(id);
       const entry = {
@@ -797,14 +802,15 @@ var validateOps = async (args) => {
         ...op.savings && (op.savings.toolCalls || op.savings.tokens) ? { savings: { toolCalls: Number(op.savings.toolCalls) || 0, tokens: Number(op.savings.tokens) || 0 } } : {},
         reinforced: 0
       };
-      const earlier = route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket && !unsupported ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title} ${content}`)) : void 0;
+      const autoApply = !retirementNeedsReview && route(entry.confidence, op.type) === "apply";
+      const earlier = !autoApply && !retirementNeedsReview && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket && !unsupported ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title} ${content}`)) : void 0;
       if (earlier) {
         entry.confidence = Math.max(entry.confidence, config.apply.autoConfidence);
         notes.push("proposed again in a later task");
         out.promoted.push(earlier.id);
       }
       const o = { op, id, type: op.type, title, ...notes.length ? { reason: notes.join("; ") } : {} };
-      if (earlier || route(entry.confidence, op.type) === "apply") {
+      if (earlier || autoApply) {
         if (op.type === "decision") adr++;
         out.records.push({ v: 1, ts: now, op: "add", entry, src });
         out.applied.push(o);
@@ -841,8 +847,8 @@ var validateOps = async (args) => {
         out.applied.push(base);
       } else out.proposals.push(base);
     } else if (op.op === "deprecate") {
-      if (groundless(String(op.reason ?? ""))) {
-        out.proposals.push({ ...base, reason: `${op.reason}; ${NOT_IN_NOTES}` });
+      if (memoryWasShown) {
+        out.proposals.push({ ...base, reason: [op.reason, RETIREMENT_REVIEW].filter(Boolean).join("; ") });
       } else if (clamp01(op.confidence) >= Math.max(0.9, config.apply.autoConfidence) && config.apply.autoTypes.includes(target.type)) {
         out.records.push({ v: 1, ts: now, op: "deprecate", id: target.id, reason: String(op.reason ?? ""), src });
         out.applied.push({ ...base, reason: op.reason });
@@ -887,7 +893,7 @@ var pick = (proposals, which) => {
   const keys = new Set(which.split(/[\s,]+/).filter(Boolean));
   return proposals.filter((p) => keys.has(String(p.n)) || keys.has(p.id));
 };
-var needsHuman = (op) => op.op === "deprecate" || op.op === "add" && op.type === "decision";
+var needsHuman = (op) => op.op === "deprecate" || op.op === "add" && (op.type === "decision" || Boolean(op.supersedes?.length));
 var asUser = (config) => ({ ...config, apply: { autoConfidence: 0, autoTypes: [...ENTRY_TYPES] } });
 var record = async (io, config, ops, now, src) => {
   const state = await loadState(io);
@@ -1347,7 +1353,7 @@ var textOrThrow = (reply) => {
   if (reply.isError) throw new Error(reply.text.trim());
   return unwrapped(reply.text);
 };
-var HIT_HEADER = /^- \[\w+ (\d+)%\] (viking:\/\/\S+)$/;
+var HIT_HEADER = /^- \[\w+ (\d+)%\] (viking:\/\/\S+)(?: tags=\[.*\])?$/;
 var FILES_ONLY = [2];
 var READ_MORE = "Use the read tool to expand a URI.";
 var NO_ABSTRACT = "(no abstract)";
@@ -1749,12 +1755,17 @@ var FACTS_FOR_CURATOR = 8;
 var FACTS_FOR_RECALL = 5;
 var SEARCH_TIMEOUT_MS = 2e4;
 var MASK2 = "[redacted]";
-var CREDENTIAL_NEAR_ITS_NAME = /(?<![\p{L}\p{N}_])(?:pass(?:word|wd|phrase)|secret|token|bearer|api[ _-]?key|access[ _-]?key|парол\p{L}*|токен\p{L}*|секрет\p{L}*|ключ\p{L}*)(?:\s+\p{L}+){0,2}[\s:=]+["']?\S*[\d!@#$%^&*]\S*/giu;
+var CREDENTIAL_NAME = /(?<![\p{L}\p{N}_])(?:pass(?:word|wd|phrase)|secret|token|bearer|api[ _-]?key|access[ _-]?key|парол\p{L}*|токен\p{L}*|секрет\p{L}*|ключ\p{L}*)(?![\p{L}\p{N}_])/u.source;
+var EXPLICIT_CREDENTIAL_VALUE = new RegExp(
+  String.raw`(${CREDENTIAL_NAME}(?:\s+\p{L}+){0,3}?(?:\s+is\s+|\s*[:=—–]\s*))(?:"[^"]+"|'[^']+'|“[^”]+”|«[^»]+»|\x60[^\x60]+\x60|\S+)`,
+  "giu"
+);
+var CREDENTIAL_NEAR_ITS_NAME = new RegExp(String.raw`${CREDENTIAL_NAME}(?:\s+\p{L}+){0,2}[\s:=]+["']?\S*[\d!@#$%^&*]\S*`, "giu");
 var LONG_RUN = /\S{20,}/g;
 var OUTSIDE_THE_PROJECT = /^(\/|~|[A-Za-z]:[\\/])/;
 var oneLine2 = (text) => text.replace(/\s+/g, " ").trim();
 var cleanLine = (text, max) => truncate(redact(oneLine2(text)).text, max);
-var withoutCredentials = (text) => redact(text).text.replace(CREDENTIAL_NEAR_ITS_NAME, MASK2).replace(LONG_RUN, (run) => /\p{L}/u.test(run) && /\d/.test(run) ? MASK2 : run);
+var withoutCredentials = (text) => redact(text).text.replace(EXPLICIT_CREDENTIAL_VALUE, "$1" + MASK2).replace(CREDENTIAL_NEAR_ITS_NAME, MASK2).replace(LONG_RUN, (run) => /\p{L}/u.test(run) && /\d/.test(run) ? MASK2 : run);
 var memoryQuery = (prompt, edits) => {
   const files = edits.filter((file) => !OUTSIDE_THE_PROJECT.test(file)).slice(0, FILES_IN_QUERY);
   return [truncate(withoutCredentials(oneLine2(prompt ?? "")), QUERY_PROMPT_CHARS), ...files.map((file) => cleanLine(file, SOURCE_CHARS))].join(" ").trim();

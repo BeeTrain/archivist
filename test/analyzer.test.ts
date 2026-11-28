@@ -256,6 +256,18 @@ describe("reading memory for the curator", () => {
     expect(r.report.applied.map((o) => o.id)).toEqual(["gk-1"]);
   });
 
+  it("keeps an entry active when only memory contradicts what the ledger says", async () => {
+    const io = memoryIo();
+    const existing = entry({ id: "gk-1", type: "gotcha", title: "Export bundles", content: "CI compares the bundles" });
+    await appendLedger(io, [{ v: 1, ts: "2026-10-01T00:00:00.000Z", op: "add", entry: existing }]);
+    const reason = "CI no longer compares the bundles";
+    const llm = replying({ op: "deprecate", id: existing.id, reason, confidence: 0.95 });
+    const r = await analyzeSegment({ io, llm, config: config(), segment: task, messages, memory: memory([{ ref: "uuid-1", text: reason }]), now });
+    if (r.kind !== "done") throw new Error("expected a report");
+    expect(r.report.proposals).toMatchObject([{ id: existing.id, op: { op: "deprecate", reason } }]);
+    expect((await loadState(io)).entries.get(existing.id)?.status).toBe("active");
+  });
+
   it("keeps in the report what the curator was shown", async () => {
     const io = memoryIo();
     const r = await analyzeSegment({ io, llm: curating().llm, config: config(), segment: task, memory: memory([{ ref: "viking://resources/notes/export.md", text: "Exports run at night" }]), now });

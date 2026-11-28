@@ -32,7 +32,7 @@ const textOrThrow = (reply: McpReply): string => {
   return unwrapped(reply.text);
 };
 
-const HIT_HEADER = /^- \[\w+ (\d+)%\] (viking:\/\/\S+)$/;
+const HIT_HEADER = /^- \[\w+ (\d+)%\] (viking:\/\/\S+)(?: tags=\[.*\])?$/;
 const FILES_ONLY = [2];
 const READ_MORE = "Use the read tool to expand a URI.";
 const NO_ABSTRACT = "(no abstract)";
