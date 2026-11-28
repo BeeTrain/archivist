@@ -70,7 +70,7 @@ export const pick = (proposals: Proposal[], which: string): Proposal[] => {
 };
 
 /** Who should decide: a decision or a removal is the user's call; a technical fact the agent can check in the code. */
-export const needsHuman = (op: ProposedOp): boolean => op.op === "deprecate" || (op.op === "add" && op.type === "decision");
+export const needsHuman = (op: ProposedOp): boolean => op.op === "deprecate" || (op.op === "add" && (op.type === "decision" || Boolean(op.supersedes?.length)));
 
 /** The queue as data, for the triage skill. */
 export const reviewJson = (proposals: Proposal[]): string =>

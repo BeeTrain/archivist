@@ -41,6 +41,17 @@ const DUP_DOC = 0.6;
 /** This much of a fact's stems found in three consecutive lines of the docs → it is already written there. */
 const DOC_COVERAGE = 0.6;
 
+const IN_THE_NOTES = 0.5;
+const NOT_IN_NOTES = "not in the task's notes";
+const RETIREMENT_REVIEW = "retiring an entry requires review when external memory was shown";
+
+const codeSpans = (text: string): string[] => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1]!.replace(/\s+/g, " ").trim()).filter((c) => c.length >= 3);
+
+const supportedBy = (text: string, source: string): boolean => {
+  const flat = source.replace(/\s+/g, " ");
+  return coverage(text, source) >= IN_THE_NOTES && codeSpans(text).every((code) => flat.includes(code));
+};
+
 /** Kinds that can state the same fact: a pitfall and a command often do; a decision or a workflow does not. */
 const family = (t: EntryType): string => (t === "command" || t === "gotcha" ? "fact" : t);
 
@@ -94,6 +105,7 @@ export const validateOps = async (args: {
   procedureCandidates?: string[];
   /** Proposals still waiting for review: a repeat of one of them confirms it. */
   pending?: { id: string; op: ProposedOp }[];
+  groundedIn?: string;
 }): Promise<Validated> => {
   const { ops, entries, io, config, now, src } = args;
   const out: Validated = { records: [], applied: [], proposals: [], rejected: [], firstSightings: [], promoted: [] };
@@ -109,6 +121,9 @@ export const validateOps = async (args: {
   };
   const route = (confidence: number, type: EntryType): "apply" | "propose" =>
     confidence >= config.apply.autoConfidence && config.apply.autoTypes.includes(type) ? "apply" : "propose";
+  const grounding = args.groundedIn;
+  const memoryWasShown = grounding !== undefined;
+  const groundless = (text: string): boolean => memoryWasShown && !supportedBy(text, grounding);
 
   for (const raw of ops) {
     const op = raw as ProposedOp;
@@ -144,6 +159,11 @@ export const validateOps = async (args: {
         confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
         notes.push(`tied to ticket ${ticket}`);
       }
+      const unsupported = groundless(`${title} ${content} ${r?.text ?? ""}`);
+      if (unsupported) {
+        confidence = Math.min(confidence, config.apply.autoConfidence - 0.01);
+        notes.push(NOT_IN_NOTES);
+      }
       if ((args.skipped ?? []).some((s) => jaccard(s, `${title} ${content}`) >= DUP_ENTRY)) {
         out.rejected.push({ op, reason: "skipped in an earlier review" });
         continue;
@@ -172,7 +192,7 @@ export const validateOps = async (args: {
       const tiny = new Set(fact.match(/\S+/g) ?? []).size < 4;
       // A command whose every code span the docs already spell out is documented, whatever words surround it.
       // Every span counts, a lone path too: `/archivist log` in the README does not document where the store is.
-      const codes = op.type === "command" ? [...content.matchAll(/`([^`]+)`/g)].map((m) => m[1]!.replace(/\s+/g, " ").trim()).filter((c) => c.length >= 3) : [];
+      const codes = op.type === "command" ? codeSpans(content) : [];
       const codeInDocs = codes.some((c) => c.includes(" ")) && codes.every((c) => args.docs.some((d) => d.includes(c)));
       if (codeInDocs || paragraphs.some((p) => jaccard(p, fact) >= DUP_DOC) || (!tiny && windows.some((w) => coverage(fact, w) >= DOC_COVERAGE))) {
         out.rejected.push({ op, reason: "already in project docs" });
@@ -195,6 +215,8 @@ export const validateOps = async (args: {
         notes.push("decision without rationale");
       }
       const supersedes = (op.supersedes ?? []).filter((id) => active(id));
+      const retirementNeedsReview = memoryWasShown && supersedes.length > 0;
+      if (retirementNeedsReview) notes.push(RETIREMENT_REVIEW);
 
       const id = newId(op.type, taken);
       taken.add(id);
@@ -219,8 +241,9 @@ export const validateOps = async (args: {
       // Two independent sightings of a technical fact outweigh one confidence score: a fact proposed again while
       // its first proposal still waits is applied. Decisions, workflows and anything that needed a secret masked
       // keep waiting for a person.
+      const autoApply = !retirementNeedsReview && route(entry.confidence, op.type) === "apply";
       const earlier =
-        route(entry.confidence, op.type) === "propose" && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket
+        !autoApply && !retirementNeedsReview && config.review.promoteOnRepeat && family(op.type) === "fact" && !notes.includes("secrets redacted") && !ticket && !unsupported
           ? (args.pending ?? []).find((p) => p.op.op === "add" && family(p.op.type) === "fact" && !out.promoted.includes(p.id) && sameFact(`${p.op.title} ${p.op.content}`, `${title} ${content}`))
           : undefined;
       if (earlier) {
@@ -229,7 +252,7 @@ export const validateOps = async (args: {
         out.promoted.push(earlier.id);
       }
       const o: Outcome = { op, id, type: op.type, title, ...(notes.length ? { reason: notes.join("; ") } : {}) };
-      if (earlier || route(entry.confidence, op.type) === "apply") {
+      if (earlier || autoApply) {
         if (op.type === "decision") adr++;
         out.records.push({ v: 1, ts: now, op: "add", entry, src });
         out.applied.push(o);
@@ -261,13 +284,17 @@ export const validateOps = async (args: {
       };
       if (!Object.keys(patch).length) {
         out.rejected.push({ ...base, reason: "empty update" });
+      } else if (groundless(Object.values(patch).join(" "))) {
+        out.proposals.push({ ...base, reason: NOT_IN_NOTES });
       } else if (route(clamp01(op.confidence), target.type) === "apply") {
         out.records.push({ v: 1, ts: now, op: "update", id: target.id, patch, src });
         out.applied.push(base);
       } else out.proposals.push(base);
     } else if (op.op === "deprecate") {
       // Removing knowledge is riskier than adding it: a higher bar for doing it unattended.
-      if (clamp01(op.confidence) >= Math.max(0.9, config.apply.autoConfidence) && config.apply.autoTypes.includes(target.type)) {
+      if (memoryWasShown) {
+        out.proposals.push({ ...base, reason: [op.reason, RETIREMENT_REVIEW].filter(Boolean).join("; ") });
+      } else if (clamp01(op.confidence) >= Math.max(0.9, config.apply.autoConfidence) && config.apply.autoTypes.includes(target.type)) {
         out.records.push({ v: 1, ts: now, op: "deprecate", id: target.id, reason: String(op.reason ?? ""), src });
         out.applied.push({ ...base, reason: op.reason });
       } else out.proposals.push({ ...base, reason: op.reason });

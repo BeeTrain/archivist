@@ -19,6 +19,17 @@ export interface MemoryListing {
   cut?: boolean;
 }
 
+export type MemoryReach = "shared" | "all";
+
+export interface MemoryHit {
+  ref: string;
+  text: string;
+  changed?: string;
+  archivist?: { project: string; id: string };
+}
+
+export const MEMORY_SEARCH_WIDTH = 30;
+
 export interface MemoryStore {
   name: string;
   listsText?: boolean;
@@ -27,6 +38,7 @@ export interface MemoryStore {
   remove(ref: string): Promise<void>;
   fetch?(id: string, ref?: string): Promise<{ ref: string; text: string } | undefined>;
   list?(): Promise<MemoryListing>;
+  search?(query: string, reach: MemoryReach): Promise<MemoryHit[]>;
 }
 
 export interface SentItem {
@@ -136,7 +148,7 @@ const keeperOf = (copies: MemoryItem[], text: string): MemoryItem => {
   return copies.find((copy) => updated(copy) === updated(newest) && copy.text!.trimEnd() === text.trimEnd()) ?? newest;
 };
 
-const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+export const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export const reconcile = async (args: {
   store: MemoryStore;
